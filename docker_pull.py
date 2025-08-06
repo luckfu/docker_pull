@@ -11,14 +11,20 @@ import urllib3
 import argparse
 import threading
 import time
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
+from typing import Optional, Dict, Any
+import urllib.parse
 urllib3.disable_warnings()
 
 # Parse command line arguments
-parser = argparse.ArgumentParser(description='Pull Docker images with platform specification')
+parser = argparse.ArgumentParser(description='Pull Docker images with platform specification and authentication support')
 parser.add_argument('image', help='[registry/][repository/]image[:tag|@digest]')
 parser.add_argument('--platform', help='Target platform (e.g., linux/amd64, linux/arm64, linux/arm/v7)')
 parser.add_argument('--max-concurrent-downloads', type=int, default=3, help='Maximum number of concurrent layer downloads (default: 3)')
+parser.add_argument('--username', help='Username for registry authentication (supports Docker Hub, GCR, ECR, Harbor, etc.)')
+parser.add_argument('--password', help='Password for registry authentication')
 args = parser.parse_args()
 
 image_arg = args.image
@@ -28,6 +34,45 @@ max_concurrent_downloads = args.max_concurrent_downloads
 # Thread-safe progress tracking
 progress_lock = threading.Lock()
 download_progress = {}
+
+# Global session for connection pooling
+session = requests.Session()
+session.headers.update({'User-Agent': 'Docker-Pull-Script/1.0'})
+
+# Authentication support
+username = args.username
+password = args.password
+
+# Display authentication info
+if username and password:
+    print(f"Using authentication for user: {username}")
+elif username or password:
+    print("Warning: Both username and password are required for authentication")
+else:
+    print("Using anonymous access (no credentials provided)")
+
+# Retry decorator
+class RetryError(Exception):
+    pass
+
+def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            current_delay = delay
+            while attempt < max_attempts:
+                try:
+                    return func(*args, **kwargs)
+                except (requests.RequestException, RetryError) as e:
+                    attempt += 1
+                    if attempt >= max_attempts:
+                        raise
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+            return None
+        return wrapper
+    return decorator
 
 # Look for the Docker image to download
 repo = 'library'
@@ -42,400 +87,354 @@ except ValueError:
         img = imgparts[-1]
 # Docker client doesn't seem to consider the first element as a potential registry unless there is a '.' or ':'
 if len(imgparts) > 1 and ('.' in imgparts[0] or ':' in imgparts[0]):
-	registry = imgparts[0]
-	repo = '/'.join(imgparts[1:-1])
+    registry = imgparts[0]
+    repo = '/'.join(imgparts[1:-1])
 else:
-	registry = 'registry-1.docker.io'
-	if len(imgparts[:-1]) != 0:
-		repo = '/'.join(imgparts[:-1])
-	else:
-		repo = 'library'
+    registry = 'registry-1.docker.io'
+    if len(imgparts[:-1]) != 0:
+        repo = '/'.join(imgparts[:-1])
+    else:
+        repo = 'library'
 repository = '{}/{}'.format(repo, img)
 
 # Get Docker authentication endpoint when it is required
 auth_url='https://auth.docker.io/token'
 reg_service='registry.docker.io'
-resp = requests.get('https://{}/v2/'.format(registry), verify=False)
+
+# Handle authentication for different registry types
+registry_auth_endpoints = {
+    'registry-1.docker.io': {
+        'auth_url': 'https://auth.docker.io/token',
+        'service': 'registry.docker.io'
+    },
+    'gcr.io': {
+        'auth_url': 'https://gcr.io/v2/token',
+        'service': 'gcr.io'
+    },
+    'us.gcr.io': {
+        'auth_url': 'https://us.gcr.io/v2/token',
+        'service': 'us.gcr.io'
+    },
+    'eu.gcr.io': {
+        'auth_url': 'https://eu.gcr.io/v2/token',
+        'service': 'eu.gcr.io'
+    },
+    'asia.gcr.io': {
+        'auth_url': 'https://asia.gcr.io/v2/token',
+        'service': 'asia.gcr.io'
+    },
+    'quay.io': {
+        'auth_url': 'https://quay.io/v2/auth',
+        'service': 'quay.io'
+    }
+}
+
+# Check if we have a known registry
+if registry in registry_auth_endpoints:
+    auth_url = registry_auth_endpoints[registry]['auth_url']
+    reg_service = registry_auth_endpoints[registry]['service']
+
+# Probe for authentication endpoint
+resp = requests.get(f'https://{registry}/v2/', verify=False)
 if resp.status_code == 401:
-	auth_url = resp.headers['WWW-Authenticate'].split('"')[1]
-	try:
-		reg_service = resp.headers['WWW-Authenticate'].split('"')[3]
-	except IndexError:
-		reg_service = ""
+    www_auth = resp.headers.get('WWW-Authenticate', '')
+    if 'Bearer' in www_auth:
+        # Parse WWW-Authenticate header for token endpoint
+        try:
+            # Handle different formats of WWW-Authenticate header
+            if 'realm=' in www_auth:
+                realm_start = www_auth.find('realm="') + 7
+                realm_end = www_auth.find('"', realm_start)
+                auth_url = www_auth[realm_start:realm_end]
+                
+            if 'service=' in www_auth:
+                service_start = www_auth.find('service="') + 9
+                service_end = www_auth.find('"', service_start)
+                if service_start > 8:  # Check if service= was found
+                    reg_service = www_auth[service_start:service_end]
+        except (IndexError, ValueError):
+            # Fallback to registry-specific defaults
+            pass
+    elif 'Basic' in www_auth:
+        # Registry uses basic authentication
+        print(f"Registry {registry} uses basic authentication")
 
-# Get Docker token (this function is useless for unauthenticated registries like Microsoft)
-def get_auth_head(type):
-	resp = requests.get('{}?service={}&scope=repository:{}:pull'.format(auth_url, reg_service, repository), verify=False)
-	access_token = resp.json()['token']
-	auth_head = {'Authorization':'Bearer '+ access_token, 'Accept': type}
-	return auth_head
 
-# Docker style progress bar
-def progress_bar(ublob, nb_traits):
-	sys.stdout.write('\r' + ublob[7:19] + ': Downloading [')
-	for i in range(0, nb_traits):
-		if i == nb_traits - 1:
-			sys.stdout.write('>')
-		else:
-			sys.stdout.write('=')
-	for i in range(0, 49 - nb_traits):
-		sys.stdout.write(' ')
-	sys.stdout.write(']')
-	sys.stdout.flush()
+def get_auth_head(type_var):
+    header = {'Accept': type_var}
+    
+    # If username and password are provided, use basic auth
+    if username and password:
+        # Use basic authentication for private registries
+        credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+        header['Authorization'] = f'Basic {credentials}'
+        return header
+    
+    # For public registries or when no credentials provided, use token auth
+    try:
+        token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
+        
+        # Add credentials to token request if available
+        auth = None
+        if username and password:
+            auth = (username, password)
+            
+        resp = requests.get(token_url, auth=auth, verify=False)
+        
+        if resp.status_code == 200:
+            token_data = resp.json()
+            token = token_data.get('token') or token_data.get('access_token')
+            if token:
+                header['Authorization'] = f'Bearer {token}'
+        else:
+            # If token auth fails, try anonymous access
+            print(f"Warning: Token authentication failed with status {resp.status_code}")
+            
+    except Exception as e:
+        print(f"Warning: Could not obtain authentication token: {e}")
+    
+    return header
 
+def format_speed(bytes_downloaded):
+    """Format download speed in human-readable format"""
+    if bytes_downloaded < 1024:
+        return f"{bytes_downloaded:.0f} B"
+    elif bytes_downloaded < 1024 * 1024:
+        return f"{bytes_downloaded/1024:.1f} KB"
+    elif bytes_downloaded < 1024 * 1024 * 1024:
+        return f"{bytes_downloaded/(1024*1024):.1f} MB"
+    else:
+        return f"{bytes_downloaded/(1024*1024*1024):.1f} GB"
+
+def format_time(seconds):
+    """Format time in human-readable format"""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.0f}m{seconds%60:.0f}s"
+    else:
+        return f"{seconds/3600:.0f}h{(seconds%3600)/60:.0f}m"
+
+def progress_bar(ublob, downloaded, total, start_time):
+    """Enhanced progress bar with speed and ETA"""
+    if total and total > 0:
+        percentage = (downloaded / total) * 100
+        bar_length = 30
+        filled_length = int(bar_length * downloaded // total)
+        bar = '█' * filled_length + '-' * (bar_length - filled_length)
+        
+        elapsed = time.time() - start_time
+        speed = downloaded / elapsed if elapsed > 0 else 0
+        
+        if total > downloaded:
+            eta = (total - downloaded) / speed if speed > 0 else 0
+            eta_str = format_time(eta)
+        else:
+            eta_str = "0s"
+        
+        speed_str = format_speed(speed)
+        
+        sys.stdout.write(f'\r{ublob[7:19]}: |{bar}| {percentage:.1f}% ({speed_str}/s, ETA: {eta_str})')
+        sys.stdout.flush()
+    else:
+        # Unknown total size
+        speed = format_speed(downloaded / (time.time() - start_time))
+        sys.stdout.write(f'\r{ublob[7:19]}: Downloaded {format_speed(downloaded)} ({speed}/s)')
+        sys.stdout.flush()
+
+@retry(max_attempts=3, delay=1.0, backoff=2.0)
 def download_layer(layer, imgdir, parentid):
-	"""Download a single layer in a separate thread"""
-	ublob = layer['digest']
-	# FIXME: Creating fake layer ID. Don't know how Docker generates it
-	fake_layerid = hashlib.sha256((parentid+'\n'+ublob+'\n').encode('utf-8')).hexdigest()
-	layerdir = imgdir + '/' + fake_layerid
-	os.mkdir(layerdir)
+    """Download a single layer in a separate thread with streaming and progress"""
+    ublob = layer['digest']
+    fake_layerid = hashlib.sha256((parentid+'\n'+ublob+'\n').encode('utf-8')).hexdigest()
+    layerdir = imgdir + '/' + fake_layerid
+    os.makedirs(layerdir, exist_ok=True)
 
-	# Creating VERSION file
-	file = open(layerdir + '/VERSION', 'w')
-	file.write('1.0')
-	file.close()
+    # Create VERSION file
+    with open(layerdir + '/VERSION', 'w') as f:
+        f.write('1.0')
 
-	# Creating layer.tar file
-	with progress_lock:
-		sys.stdout.write(ublob[7:19] + ': Downloading...\n')
-		sys.stdout.flush()
-	
-	auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json') # refreshing token to avoid its expiration
-	bresp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, ublob), headers=auth_head, stream=True, verify=False)
-	if (bresp.status_code != 200): # When the layer is located at a custom URL
-		if 'urls' in layer and len(layer['urls']) > 0:
-			bresp = requests.get(layer['urls'][0], headers=auth_head, stream=True, verify=False)
-		if (bresp.status_code != 200):
-			content_length = bresp.headers.get('Content-Length', 'unknown')
-			with progress_lock:
-				print('\rERROR: Cannot download layer {} [HTTP {}] Content-Length: {}'.format(ublob[7:19], bresp.status_code, content_length))
-				print(bresp.content)
-			return None
-	
-	# Stream download
-	bresp.raise_for_status()
-	content_length = bresp.headers.get('Content-Length')
-	if content_length:
-		unit = int(content_length) / 50
-	else:
-		unit = 8192  # fallback unit size
-	
-	acc = 0
-	nb_traits = 0
-	with open(layerdir + '/layer_gzip.tar', "wb") as file:
-		for chunk in bresp.iter_content(chunk_size=8192): 
-			if chunk:
-				file.write(chunk)
-				acc = acc + 8192
-				if acc > unit:
-					nb_traits = nb_traits + 1
-					acc = 0
-	
-	with progress_lock:
-		sys.stdout.write("{}:  Extracting...\n".format(ublob[7:19]))
-		sys.stdout.flush()
-	
-	with open(layerdir + '/layer.tar', "wb") as file: # Decompress gzip response
-		with gzip.open(layerdir + '/layer_gzip.tar','rb') as unzLayer:
-			# Type cast to ensure compatibility with copyfileobj
-			shutil.copyfileobj(unzLayer, file)  # type: ignore
-	os.remove(layerdir + '/layer_gzip.tar')
-	content_length = bresp.headers.get('Content-Length', 'unknown')
-	with progress_lock:
-		print("{}: Pull complete [{}]".format(ublob[7:19], content_length))
-	
-	return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
+    start_time = time.time()
 
-# First try to fetch manifest list to check for multi-platform support
-auth_head = get_auth_head('application/vnd.docker.distribution.manifest.list.v2+json')
+    auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
+
+    # Try primary URL first, then fallback URLs
+    urls = [f'https://{registry}/v2/{repository}/blobs/{ublob}']
+    if 'urls' in layer and layer['urls']:
+        urls.extend(layer['urls'])
+
+    for url in urls:
+        try:
+            with session.get(url, headers=auth_head, stream=True, verify=False, timeout=30) as bresp:
+                if bresp.status_code == 200:
+                    break
+        except requests.RequestException:
+            continue
+    else:
+        with progress_lock:
+            print(f'ERROR: Cannot download layer {ublob[7:19]} from any source')
+        return None
+
+    # Stream download with progress
+    content_length = int(bresp.headers.get('Content-Length', 0)) if bresp.headers.get('Content-Length') else None
+    downloaded = 0
+    last_update = 0
+
+    # Stream directly to file without loading entire content in memory
+    with open(layerdir + '/layer_gzip.tar', 'wb') as file:
+        for chunk in bresp.iter_content(chunk_size=1024*1024):  # 1MB chunks
+            if chunk:
+                file.write(chunk)
+                downloaded += len(chunk)
+
+                # Update progress every 100ms
+                current_time = time.time()
+                if current_time - last_update > 0.1:
+                    with progress_lock:
+                        progress_bar(ublob, downloaded, content_length, start_time)
+                    last_update = current_time
+
+    with progress_lock:
+        print(f'{ublob[7:19]}: Download complete ({format_speed(downloaded)})')
+        print(f'{ublob[7:19]}: Extracting...')
+
+    # Stream decompress to avoid memory issues
+    with open(layerdir + '/layer.tar', 'wb') as out_file:
+        with gzip.open(layerdir + '/layer_gzip.tar', 'rb') as gz_file:
+            shutil.copyfileobj(gz_file, out_file)
+
+    os.remove(layerdir + '/layer_gzip.tar')
+    return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
+
+# Main execution continues...
+# Get Docker authentication
+auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
+
+# Get manifest
 resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, tag), headers=auth_head, verify=False)
+if resp.status_code != 200:
+    print('Cannot fetch manifest for {} [HTTP {}]'.format(repository, resp.status_code))
+    if resp.status_code == 401:
+        print('Authentication failed. Please check your credentials.')
+        if not username or not password:
+            print('Private registry requires authentication. Use --username and --password arguments.')
+    elif resp.status_code == 403:
+        print('Access forbidden. You may not have permission to access this image.')
+    print(resp.content)
+    exit(1)
 
-# Initialize manifest variables
-manifests = None
-manifest_data = None
+manifest = resp.json()
 
-# Check if we got a manifest list (multi-platform)
-if resp.status_code == 200 and 'manifests' in resp.json():
-	print('[+] Multi-platform manifest detected')
-	manifests = resp.json()['manifests']
-	# Continue with existing multi-platform logic
-elif resp.status_code == 200:
-	# Single platform manifest, but got it with list accept header
-	print('[+] Single platform manifest detected')
-	manifest_data = resp.json()
-	# Handle single manifest case
-else:
-	# Fallback to v2 manifest
-	print('[-] Cannot fetch manifest list, trying v2 manifest for {} [HTTP {}]'.format(repository, resp.status_code))
-	auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
-	resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, tag), headers=auth_head, verify=False)
-	if resp.status_code != 200:
-		print('[-] Cannot fetch any manifest for {} [HTTP {}]'.format(repository, resp.status_code))
-		print(resp.content)
-		exit(1)
-	manifest_data = resp.json()
+# Handle multi-platform images
+if target_platform and 'manifests' in manifest:
+    # This is a manifest list, find the right platform
+    found = False
+    for m in manifest['manifests']:
+        platform = m.get('platform', {})
+        platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
+        if platform.get('variant'):
+            platform_str += f"/{platform.get('variant')}"
+        
+        if platform_str == target_platform:
+            print(f"Found manifest for platform: {platform_str}")
+            digest = m['digest']
+            
+            # Fetch the actual manifest for this platform
+            auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
+            resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, digest), headers=auth_head, verify=False)
+            if resp.status_code != 200:
+                print('Cannot fetch manifest for platform {} [HTTP {}]'.format(target_platform, resp.status_code))
+                if resp.status_code == 401:
+                    print('Authentication failed. Please check your credentials.')
+                    if not username or not password:
+                        print('Private registry requires authentication. Use --username and --password arguments.')
+                elif resp.status_code == 403:
+                    print('Access forbidden. You may not have permission to access this image.')
+                exit(1)
+            
+            manifest = resp.json()
+            found = True
+            break
+    
+    if not found:
+        print('No manifest found for platform: {}'.format(target_platform))
+        print('Available platforms:')
+        for m in manifest['manifests']:
+            platform = m.get('platform', {})
+            platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
+            if platform.get('variant'):
+                platform_str += f"/{platform.get('variant')}"
+            print(f"  - {platform_str}")
+        exit(1)
 
-# Initialize variables
-layers = None
-config = None
-confresp = None
+# Create image directory
+imgdir = 'docker_{}_{}'.format(img, tag.replace(':', '_').replace('@', '_'))
+if os.path.exists(imgdir):
+    shutil.rmtree(imgdir)
+os.makedirs(imgdir)
 
-# Handle multi-platform manifest
-if manifests is not None:
-	# Handle platform selection
-	if target_platform:
-		print('[+] Searching for platform-specific manifest...')
-		selected_manifest = None
+# Get layers
+layers = manifest['layers']
 
-		for manifest in manifests:
-			platform_info = manifest.get('platform', {})
-			platform_string = f"{platform_info.get('os', 'linux')}/{platform_info.get('architecture', 'amd64')}"
-			
-			# Handle variant (e.g., arm/v7)
-			if 'variant' in platform_info:
-				platform_string += f"/{platform_info['variant']}"
-			
-			if platform_string == target_platform:
-				selected_manifest = manifest
-				break
-
-		if selected_manifest:
-			print(f'[+] Found manifest for platform: {target_platform}')
-			manifest_digest = selected_manifest['digest']
-			
-			# Fetch the platform-specific manifest
-			auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
-			resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, manifest_digest), headers=auth_head, verify=False)
-			if resp.status_code != 200:
-				print('[-] Cannot fetch platform-specific manifest [HTTP {}]'.format(resp.status_code))
-				exit(1)
-			
-			layers = resp.json()['layers']
-			config = resp.json()['config']['digest']
-			confresp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, config), headers=auth_head, verify=False)
-		else:
-			print('[-] No manifest found for platform: {}'.format(target_platform))
-			print('[+] Available platforms:')
-			for manifest in manifests:
-				platform_info = manifest.get('platform', {})
-				platform_str = f"{platform_info.get('os', 'linux')}/{platform_info.get('architecture', 'amd64')}"
-				if 'variant' in platform_info:
-					platform_str += f"/{platform_info['variant']}"
-				print(f'    - {platform_str}')
-			exit(1)
-	else:
-		# No platform specified, show available platforms
-		print('[+] Manifests found for this tag (use --platform to specify platform):')
-		for manifest in manifests:
-			platform_info = manifest.get('platform', {})
-			platform_str = f"{platform_info.get('os', 'linux')}/{platform_info.get('architecture', 'amd64')}"
-			if 'variant' in platform_info:
-				platform_str += f"/{platform_info['variant']}"
-			print(f'    Platform: {platform_str}, digest: {manifest["digest"]}')
-		exit(1)
-
-# Process single manifest case
-if layers is None and manifest_data is not None:
-	
-	# Check platform compatibility for single manifest
-	if target_platform:
-		# For schema v2, get platform info from config
-		if 'layers' in manifest_data:
-			# Get config to check architecture
-			temp_config = manifest_data['config']['digest']
-			temp_confresp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, temp_config), headers=auth_head, verify=False)
-			if temp_confresp.status_code == 200:
-				config_json = temp_confresp.json()
-				image_arch = config_json.get('architecture', 'amd64')
-				image_os = config_json.get('os', 'linux')
-				image_variant = config_json.get('variant', '')
-				image_platform = f"{image_os}/{image_arch}"
-				if image_variant:
-					image_platform += f"/{image_variant}"
-				
-				if image_platform != target_platform:
-					print(f'[-] Platform mismatch: requested {target_platform}, but image only supports {image_platform}')
-					print('[-] This image does not support multi-platform manifests')
-					exit(1)
-				else:
-					print(f'[+] Platform verified: {target_platform}')
-		elif 'fsLayers' in manifest_data:
-			# For schema v1, check architecture field
-			image_arch = manifest_data.get('architecture', 'amd64')
-			image_platform = f"linux/{image_arch}"
-			
-			if image_platform != target_platform:
-				print(f'[-] Platform mismatch: requested {target_platform}, but image only supports {image_platform}')
-				print('[-] Schema v1 manifests do not support multi-platform')
-				exit(1)
-			else:
-				print(f'[+] Platform verified: {target_platform}')
-	
-	# Handle different manifest schema versions
-	if 'layers' in manifest_data:
-		# Schema version 2
-		layers = manifest_data['layers']
-		config = manifest_data['config']['digest']
-		confresp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, config), headers=auth_head, verify=False)
-	elif 'fsLayers' in manifest_data:
-		# Schema version 1 - convert to version 2 format
-		print('[+] Converting schema v1 manifest to v2 format')
-		layers = []
-		for fs_layer in manifest_data['fsLayers']:
-			layers.append({'digest': fs_layer['blobSum']})
-		# For schema v1, we need to create a fake config
-		config_data = {
-			'architecture': manifest_data.get('architecture', 'amd64'),
-			'config': {},
-			'created': '1970-01-01T00:00:00Z',
-			'history': [],
-			'os': 'linux',
-			'rootfs': {
-				'type': 'layers',
-				'diff_ids': []
-			}
-		}
-		# Create a fake config blob
-		config_json = json.dumps(config_data).encode('utf-8')
-		config_digest = 'sha256:' + hashlib.sha256(config_json).hexdigest()
-		config = config_digest
-		# Create a mock response for config
-		class MockResponse:
-			def __init__(self, content):
-				self.content = content
-				self.status_code = 200
-		confresp = MockResponse(config_json)
-	else:
-		print('[-] Invalid manifest format: missing layers or fsLayers field')
-		print('Manifest content:', manifest_data)
-		exit(1)
-
-# Create tmp folder that will hold the image
-imgdir = 'tmp_{}_{}'.format(img, tag.replace(':', '@'))
-os.mkdir(imgdir)
-print('Creating image structure in: ' + imgdir)
-if config is not None and confresp is not None:
-	file = open('{}/{}.json'.format(imgdir, config[7:]), 'wb')
-	if hasattr(confresp, 'content'):
-		# For both Response and MockResponse objects
-		content_data = getattr(confresp, 'content')
-		if isinstance(content_data, bytes):
-			file.write(content_data)
-		elif isinstance(content_data, str):
-			file.write(content_data.encode('utf-8'))
-	file.close()
-
-if config is not None:
-	manifest_content = [{
-		'Config': config[7:] + '.json',
-		'RepoTags': [ ],
-		'Layers': [ ]
-		}]
-else:
-	print('[-] Error: config is None')
-	exit(1)
-if len(imgparts[:-1]) != 0:
-	manifest_content[0]['RepoTags'].append('/'.join(imgparts[:-1]) + '/' + img + ':' + tag)
-else:
-	manifest_content[0]['RepoTags'].append(img + ':' + tag)
-
-empty_json = '{"created":"1970-01-01T00:00:00Z","container_config":{"Hostname":"","Domainname":"","User":"","AttachStdin":false, \
-	"AttachStdout":false,"AttachStderr":false,"Tty":false,"OpenStdin":false, "StdinOnce":false,"Env":null,"Cmd":null,"Image":"", \
-	"Volumes":null,"WorkingDir":"","Entrypoint":null,"OnBuild":null,"Labels":null}}'
-
-# Ensure all variables are properly initialized before use
-if layers is None or config is None or confresp is None:
-	print('[-] Error: Required manifest data not properly initialized')
-	exit(1)
-
-# Build layer folders with concurrent downloads
-print(f'[+] Starting concurrent download of {len(layers)} layers (max concurrent: {max_concurrent_downloads})')
+# Create repositories file
+repositories = '{{"{}":{{"{}":"{}"}}}}'.format(repo, img, tag)
+with open(imgdir + '/repositories', 'w') as f:
+    f.write(repositories)
 
 # Download layers concurrently
-download_results = []
+print('Downloading {} layers...'.format(len(layers)))
 with ThreadPoolExecutor(max_workers=max_concurrent_downloads) as executor:
-	# Submit all download tasks
-	future_to_layer = {}
-	parentid = ''
-	for i, layer in enumerate(layers):
-		# Calculate parentid for this layer (based on previous layers)
-		temp_parentid = ''
-		for j in range(i):
-			temp_ublob = layers[j]['digest']
-			temp_fake_layerid = hashlib.sha256((temp_parentid+'\n'+temp_ublob+'\n').encode('utf-8')).hexdigest()
-			temp_parentid = temp_fake_layerid
-		
-		future = executor.submit(download_layer, layer, imgdir, temp_parentid)
-		future_to_layer[future] = (i, layer)
-	
-	# Collect results as they complete
-	for future in as_completed(future_to_layer):
-		layer_index, layer = future_to_layer[future]
-		try:
-			result = future.result()
-			if result is None:
-				print('[-] Failed to download layer')
-				exit(1)
-			download_results.append((layer_index, result))
-		except Exception as exc:
-			print(f'[-] Layer download generated an exception: {exc}')
-			exit(1)
+    future_to_layer = {executor.submit(download_layer, layer, imgdir, 'sha256:' + hashlib.sha256(''.encode()).hexdigest()): layer for layer in layers}
+    
+    for future in as_completed(future_to_layer):
+        layer = future_to_layer[future]
+        try:
+            result = future.result()
+            if result:
+                print('{}: Layer {} completed'.format(result['fake_layerid'][:12], result['layer']['digest'][7:19]))
+            else:
+                print('ERROR: Failed to download layer {}'.format(layer['digest'][7:19]))
+        except Exception as e:
+            print('ERROR: Exception downloading layer {}: {}'.format(layer['digest'][7:19], str(e)))
 
-# Sort results by layer index to maintain order
-download_results.sort(key=lambda x: x[0])
+# Create manifest.json
+manifest_json = [{
+    'Config': 'config.json',
+    'RepoTags': ['{}:{}'.format(repository, tag)],
+    'Layers': ['{}/layer.tar'.format(hashlib.sha256(('sha256:' + hashlib.sha256(''.encode()).hexdigest() + '\n' + layer['digest'] + '\n').encode()).hexdigest()) for layer in layers]
+}]
 
-# Add layers to content in correct order and create JSON files
-parentid = ''
-for layer_index, result in download_results:
-	manifest_content[0]['Layers'].append(result['fake_layerid'] + '/layer.tar')
-	
-	# Creating json file for each layer
-	layerdir = result['layerdir']
-	layer = result['layer']
-	fake_layerid = result['fake_layerid']
-	
-	file = open(layerdir + '/json', 'w')
-	# last layer = config manifest - history - rootfs
-	if layers[-1]['digest'] == layer['digest']:
-		# FIXME: json.loads() automatically converts to unicode, thus decoding values whereas Docker doesn't
-		if hasattr(confresp, 'content'):
-			json_obj = json.loads(confresp.content)
-		else:
-			json_obj = json.loads(empty_json)
-		if 'history' in json_obj:
-			del json_obj['history']
-		if 'rootfs' in json_obj:
-			del json_obj['rootfs']
-		elif 'rootfS' in json_obj: # Because Microsoft loves case insensitiveness
-			del json_obj['rootfS']
-	else: # other layers json are empty
-		json_obj = json.loads(empty_json)
-	json_obj['id'] = fake_layerid
-	if parentid:
-		json_obj['parent'] = parentid
-	parentid = json_obj['id']
-	file.write(json.dumps(json_obj))
-	file.close()
+with open(imgdir + '/manifest.json', 'w') as f:
+    json.dump(manifest_json, f)
 
-file = open(imgdir + '/manifest.json', 'w')
-file.write(json.dumps(manifest_content))
-file.close()
+# Save config blob
+config_digest = manifest['config']['digest']
+auth_head = get_auth_head('application/vnd.docker.container.image.v1+json')
+resp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, config_digest), headers=auth_head, verify=False)
+if resp.status_code != 200:
+    print('Cannot fetch config blob [HTTP {}]'.format(resp.status_code))
+    if resp.status_code == 401:
+        print('Authentication failed. Please check your credentials.')
+        if not username or not password:
+            print('Private registry requires authentication. Use --username and --password arguments.')
+    elif resp.status_code == 403:
+        print('Access forbidden. You may not have permission to access this image.')
+    exit(1)
 
-if len(imgparts[:-1]) != 0:
-    repo_content = { '/'.join(imgparts[:-1]) + '/' + img : { tag : parentid } }
-else: # when pulling only an img (without repo and registry)
-    repo_content = { img : { tag : parentid } }
-file = open(imgdir + '/repositories', 'w')
-file.write(json.dumps(repo_content))
-file.close()
+with open(imgdir + '/config.json', 'wb') as f:
+    f.write(resp.content)
 
-# Create image tar and clean tmp folder
+# Create final tar file
 docker_tar = repo.replace('/', '_') + '_' + img + '.tar'
 sys.stdout.write("Creating archive...")
 sys.stdout.flush()
+
 tar = tarfile.open(docker_tar, "w")
 tar.add(imgdir, arcname=os.path.sep)
 tar.close()
+
+# Clean up temporary directory
 shutil.rmtree(imgdir)
+
 print('\rDocker image pulled: ' + docker_tar)
+print('You can load it with: docker load < ' + docker_tar)
