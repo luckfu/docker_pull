@@ -19,16 +19,64 @@ import urllib.parse
 from pathlib import Path
 urllib3.disable_warnings()
 
+# 版本和版权信息
+__version__ = "1.1.1"
+__author__ = "luckfu"
+__copyright__ = "Copyright © 2024 luckfu"
+__license__ = "MIT"
+__url__ = "https://github.com/luckfu/docker_pull"
+
+def show_version():
+    """显示版本和版权信息"""
+    print(f"Docker Pull v{__version__}")
+    print(f"高性能Docker镜像下载工具，支持多平台、并发下载、智能缓存")
+    print(f"{__copyright__}")
+    print(f"开源项目: {__url__}")
+    print(f"许可证: {__license__}")
+    print()
+
+def show_banner():
+    """显示启动横幅"""
+    print("="*60)
+    print(f"🐳 Docker Pull v{__version__} - 高性能镜像下载工具")
+    print(f"📦 来自开源项目: {__url__}")
+    print(f"⚡ 支持多平台、并发下载、智能缓存")
+    print("="*60)
+    print()
+
 # Parse command line arguments
-parser = argparse.ArgumentParser(description='Pull Docker images with platform specification and authentication support')
-parser.add_argument('image', help='[registry/][repository/]image[:tag|@digest]')
+parser = argparse.ArgumentParser(
+    description='高性能Docker镜像下载工具，支持多平台、并发下载、智能缓存',
+    epilog=f'开源项目: {__url__}',
+    formatter_class=argparse.RawDescriptionHelpFormatter
+)
+parser.add_argument('image', nargs='?', help='[registry/][repository/]image[:tag|@digest]')
 parser.add_argument('--platform', help='Target platform (e.g., linux/amd64, linux/arm64, linux/arm/v7)')
 parser.add_argument('--max-concurrent-downloads', type=int, default=3, help='Maximum number of concurrent layer downloads (default: 3)')
 parser.add_argument('--username', help='Username for registry authentication (supports Docker Hub, GCR, ECR, Harbor, etc.)')
 parser.add_argument('--password', help='Password for registry authentication')
-parser.add_argument('--cache-dir', help='Layer cache directory (default: ~/.docker_pull_cache)', default=None)
+parser.add_argument('--cache-dir', help='Layer cache directory (default: ./docker_images_cache)', default=None)
 parser.add_argument('--no-cache', action='store_true', help='Disable layer caching')
+parser.add_argument('--version', action='store_true', help='Show version information and exit')
 args = parser.parse_args()
+
+# 处理版本信息显示
+if args.version:
+    show_version()
+    sys.exit(0)
+
+# 检查是否提供了镜像参数
+if not args.image:
+    show_banner()
+    parser.print_help()
+    print(f"\n💡 示例用法:")
+    print(f"   python docker_pull.py nginx:latest")
+    print(f"   python docker_pull.py --platform linux/arm64 ubuntu:20.04")
+    print(f"   python docker_pull.py --version")
+    sys.exit(1)
+
+# 显示启动横幅
+show_banner()
 
 image_arg = args.image
 target_platform = args.platform
@@ -623,6 +671,8 @@ shutil.rmtree(imgdir)
 
 print('\rDocker image pulled: ' + docker_tar)
 print('You can load it with: docker load < ' + docker_tar)
+print(f'\n🎉 下载完成！感谢使用 Docker Pull v{__version__}')
+print(f'📦 开源项目: {__url__}')
 
 # Display cache statistics
 if use_cache and (cache_stats['hits'] > 0 or cache_stats['misses'] > 0):

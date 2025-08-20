@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 1, 1, 0),
+    prodvers=(1, 1, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,11 +14,18 @@ VSVersionInfo(
       [
         StringTable(
           u'040904B0',
-          [StringStruct(u'CompanyName', u'Your Name'),
-           StringStruct(u'FileDescription', u'Docker Pull Tool'),
-           StringStruct(u'FileVersion', u'1.0.0'),
+          [StringStruct(u'CompanyName', u'luckfu'),
+           StringStruct(u'FileDescription', u'高性能Docker镜像下载工具，支持多平台、并发下载、智能缓存'),
+           StringStruct(u'FileVersion', u'1.1.1.0'),
            StringStruct(u'ProductName', u'Docker Pull'),
-           StringStruct(u'ProductVersion', u'1.0.0')])
+           StringStruct(u'ProductVersion', u'1.1.1'),
+           StringStruct(u'LegalCopyright', u'Copyright © 2024 luckfu. 开源项目: https://github.com/luckfu/docker_pull'),
+           StringStruct(u'Comments', u'高性能Docker镜像下载工具 - 来自 https://github.com/luckfu/docker_pull 开源项目'),
+           StringStruct(u'InternalName', u'docker_pull'),
+           StringStruct(u'OriginalFilename', u'docker_pull.exe'),
+           StringStruct(u'LegalTrademarks', u''),
+           StringStruct(u'PrivateBuild', u''),
+           StringStruct(u'SpecialBuild', u'')])
       ]), 
     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
   ]
