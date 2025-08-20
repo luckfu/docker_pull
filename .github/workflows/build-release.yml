@@ -80,28 +80,34 @@ jobs:
         else
           pip install -r requirements.txt
         fi
-        pip install pyinstaller
+        pip install pyinstaller Pillow
+    
+    - name: Setup cross-platform icons
+      run: |
+        python setup_icons.py
     
     - name: Build with PyInstaller (Linux/macOS - Standard)
       if: matrix.platform != 'windows' && matrix.build_type == 'standard'
       run: |
-        pyinstaller --onefile --name docker_pull_${{ matrix.platform }}_${{ matrix.arch }} docker_pull.py
+        pyinstaller docker_pull_platform.spec
+        mv dist/docker_pull dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
     
     - name: Build with PyInstaller (Linux/macOS - Optimized)
       if: matrix.platform != 'windows' && matrix.build_type == 'optimized'
       run: |
-        pyinstaller docker_pull_ultra_optimized.spec
+        pyinstaller docker_pull_ultra_optimized_platform.spec
         mv dist/docker_pull_mini dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
     
     - name: Build with PyInstaller (Windows - Standard)
       if: matrix.platform == 'windows' && matrix.build_type == 'standard'
       run: |
-        pyinstaller --onefile --name docker_pull_${{ matrix.platform }}_${{ matrix.arch }} docker_pull.py
+        pyinstaller docker_pull_platform.spec
+        move dist\docker_pull.exe dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe
     
     - name: Build with PyInstaller (Windows - Optimized)
       if: matrix.platform == 'windows' && matrix.build_type == 'optimized'
       run: |
-        pyinstaller docker_pull_ultra_optimized.spec
+        pyinstaller docker_pull_ultra_optimized_platform.spec
         move dist\docker_pull_mini.exe dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe
     
     - name: Create archive (Linux/macOS - Standard)

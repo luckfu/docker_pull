@@ -144,6 +144,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',     # 添加图标支持
+    icon='icon.icns',     # 添加图标支持
     optimize=2,          # 最高级别的Python字节码优化
 )
