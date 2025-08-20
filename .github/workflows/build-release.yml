@@ -16,42 +16,18 @@ jobs:
             platform: linux
             arch: x64
             executable: docker_pull
-            build_type: standard
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-            executable: docker_pull_mini
-            build_type: optimized
           - os: windows-latest
             platform: windows
             arch: x64
             executable: docker_pull.exe
-            build_type: standard
-          - os: windows-latest
-            platform: windows
-            arch: x64
-            executable: docker_pull_mini.exe
-            build_type: optimized
           - os: macos-13
             platform: macos
             arch: x64
             executable: docker_pull
-            build_type: standard
-          - os: macos-13
-            platform: macos
-            arch: x64
-            executable: docker_pull_mini
-            build_type: optimized
           - os: macos-14
             platform: macos
             arch: arm64
             executable: docker_pull
-            build_type: standard
-          - os: macos-14
-            platform: macos
-            arch: arm64
-            executable: docker_pull_mini
-            build_type: optimized
 
     steps:
     - uses: actions/checkout@v4
@@ -88,11 +64,7 @@ jobs:
       if: matrix.platform == 'windows'
       run: |
         python -m pip install --upgrade pip
-        if ("${{ matrix.build_type }}" -eq "optimized") {
-          pip install -r requirements_minimal.txt
-        } else {
-          pip install -r requirements.txt
-        }
+        pip install -r requirements.txt
         pip install pyinstaller Pillow
       shell: pwsh
     
@@ -100,88 +72,45 @@ jobs:
       if: matrix.platform != 'windows'
       run: |
         python -m pip install --upgrade pip
-        if [ "${{ matrix.build_type }}" = "optimized" ]; then
-          pip install -r requirements_minimal.txt
-        else
-          pip install -r requirements.txt
-        fi
+        pip install -r requirements.txt
         pip install pyinstaller Pillow
     
     - name: Setup cross-platform icons
       run: |
         python setup_icons.py
     
-    - name: Build with PyInstaller (Linux/macOS - Standard)
-      if: matrix.platform != 'windows' && matrix.build_type == 'standard'
+    - name: Build with PyInstaller (Linux/macOS)
+      if: matrix.platform != 'windows'
       run: |
-        # Use simple spec file to ensure build success
+        # Use simple spec file with proper icon configuration
         pyinstaller docker_pull_simple.spec
         mv dist/docker_pull dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
     
-    - name: Build with PyInstaller (Linux/macOS - Optimized)
-      if: matrix.platform != 'windows' && matrix.build_type == 'optimized'
+    - name: Build with PyInstaller (Windows)
+      if: matrix.platform == 'windows'
       run: |
-        # Try optimized build, fallback to simple if it fails
-        pyinstaller docker_pull_ultra_optimized_platform.spec || pyinstaller docker_pull_simple.spec
-        if [ -f "dist/docker_pull_mini" ]; then
-          mv dist/docker_pull_mini dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
-        else
-          mv dist/docker_pull dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
-        fi
-    
-    - name: Build with PyInstaller (Windows - Standard)
-      if: matrix.platform == 'windows' && matrix.build_type == 'standard'
-      run: |
-        # Use simple spec file to ensure build success
+        # Use simple spec file with proper icon configuration
         pyinstaller docker_pull_simple.spec
         Move-Item -Path "dist\docker_pull.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe"
       shell: pwsh
     
-    - name: Build with PyInstaller (Windows - Optimized)
-      if: matrix.platform == 'windows' && matrix.build_type == 'optimized'
-      run: |
-        # Try optimized build, fallback to simple if it fails
-        try {
-          pyinstaller docker_pull_ultra_optimized_platform.spec
-          if (Test-Path "dist\docker_pull_mini.exe") {
-            Move-Item -Path "dist\docker_pull_mini.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe"
-          }
-        } catch {
-          pyinstaller docker_pull_simple.spec
-          Move-Item -Path "dist\docker_pull.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe"
-        }
-      shell: pwsh
-    
-    - name: Create archive (Linux/macOS - Standard)
-      if: matrix.platform != 'windows' && matrix.build_type == 'standard'
+    - name: Create archive (Linux/macOS)
+      if: matrix.platform != 'windows'
       run: |
         cd dist
         tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
     
-    - name: Create archive (Linux/macOS - Optimized)
-      if: matrix.platform != 'windows' && matrix.build_type == 'optimized'
-      run: |
-        cd dist
-        tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
-    
-    - name: Create archive (Windows - Standard)
-      if: matrix.platform == 'windows' && matrix.build_type == 'standard'
+    - name: Create archive (Windows)
+      if: matrix.platform == 'windows'
       run: |
         Set-Location dist
         Compress-Archive -Path "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe" -DestinationPath "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.zip"
       shell: pwsh
     
-    - name: Create archive (Windows - Optimized)
-      if: matrix.platform == 'windows' && matrix.build_type == 'optimized'
-      run: |
-        Set-Location dist
-        Compress-Archive -Path "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe" -DestinationPath "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.zip"
-      shell: pwsh
-    
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_${{ matrix.build_type }}
+        name: docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
         path: |
           dist/*.tar.gz
           dist/*.zip
