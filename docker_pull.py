@@ -126,6 +126,18 @@ registry_auth_endpoints = {
     'quay.io': {
         'auth_url': 'https://quay.io/v2/auth',
         'service': 'quay.io'
+    },
+    'registry.cn-shanghai.aliyuncs.com': {
+        'auth_url': 'https://dockerauth.cn-hangzhou.aliyuncs.com/auth',
+        'service': 'registry.aliyuncs.com:cn-shanghai:26842'
+    },
+    'registry.cn-beijing.aliyuncs.com': {
+        'auth_url': 'https://registry.cn-beijing.aliyuncs.com/v2/token',
+        'service': 'registry.cn-beijing.aliyuncs.com'
+    },
+    'registry.cn-hangzhou.aliyuncs.com': {
+        'auth_url': 'https://registry.cn-hangzhou.aliyuncs.com/v2/token',
+        'service': 'registry.cn-hangzhou.aliyuncs.com'
     }
 }
 
@@ -263,11 +275,12 @@ def download_layer(layer, imgdir, parentid):
     if 'urls' in layer and layer['urls']:
         urls.extend(layer['urls'])
 
+    bresp = None
     for url in urls:
         try:
-            with session.get(url, headers=auth_head, stream=True, verify=False, timeout=30) as bresp:
-                if bresp.status_code == 200:
-                    break
+            bresp = session.get(url, headers=auth_head, stream=True, verify=False, timeout=30)
+            if bresp.status_code == 200:
+                break
         except requests.RequestException:
             continue
     else:
@@ -301,14 +314,22 @@ def download_layer(layer, imgdir, parentid):
     # Stream decompress to avoid memory issues
     with open(layerdir + '/layer.tar', 'wb') as out_file:
         with gzip.open(layerdir + '/layer_gzip.tar', 'rb') as gz_file:
-            shutil.copyfileobj(gz_file, out_file)
+            shutil.copyfileobj(gz_file, out_file)  # type: ignore
 
     os.remove(layerdir + '/layer_gzip.tar')
     return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
 
 # Main execution continues...
 # Get Docker authentication
-auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
+# Support multiple manifest formats including OCI index
+accept_types = [
+    'application/vnd.oci.image.index.v1+json',
+    'application/vnd.oci.image.manifest.v1+json',
+    'application/vnd.docker.distribution.manifest.list.v2+json',
+    'application/vnd.docker.distribution.manifest.v2+json',
+    'application/vnd.docker.distribution.manifest.v1+json'
+]
+auth_head = get_auth_head(', '.join(accept_types))
 
 # Get manifest
 resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, tag), headers=auth_head, verify=False)
@@ -325,7 +346,12 @@ if resp.status_code != 200:
 
 manifest = resp.json()
 
-# Handle multi-platform images
+# Debug: Print manifest structure to understand the format
+print(f"Manifest keys: {list(manifest.keys())}")
+if 'mediaType' in manifest:
+    print(f"Media type: {manifest['mediaType']}")
+
+# Handle multi-platform manifests (both Docker and OCI formats)
 if target_platform and 'manifests' in manifest:
     # This is a manifest list, find the right platform
     found = False
@@ -338,10 +364,13 @@ if target_platform and 'manifests' in manifest:
         if platform_str == target_platform:
             print(f"Found manifest for platform: {platform_str}")
             digest = m['digest']
+            print(f"Platform manifest digest: {digest}")
             
             # Fetch the actual manifest for this platform
-            auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
-            resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, digest), headers=auth_head, verify=False)
+            manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
+            print(f"Fetching platform manifest from: {manifest_url}")
+            auth_head = get_auth_head(', '.join(accept_types))
+            resp = requests.get(manifest_url, headers=auth_head, verify=False)
             if resp.status_code != 200:
                 print('Cannot fetch manifest for platform {} [HTTP {}]'.format(target_platform, resp.status_code))
                 if resp.status_code == 401:
@@ -367,14 +396,57 @@ if target_platform and 'manifests' in manifest:
             print(f"  - {platform_str}")
         exit(1)
 
+# Handle case where no platform is specified but manifest is multi-platform
+if not target_platform and 'manifests' in manifest:
+    print('Multi-platform image detected. Available platforms:')
+    image_manifests = []
+    last_platform_str = ""
+    for m in manifest['manifests']:
+        # Skip attestation manifests and other non-image manifests
+        annotations = m.get('annotations', {})
+        if annotations.get('vnd.docker.reference.type') == 'attestation-manifest':
+            continue
+        
+        platform = m.get('platform', {})
+        platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
+        if platform.get('variant'):
+            platform_str += f"/{platform.get('variant')}"
+        print(f"  - {platform_str}")
+        image_manifests.append(m)
+        last_platform_str = platform_str
+    
+    if len(image_manifests) == 1:
+        # Only one actual image manifest, use it directly
+        print(f"Using the only available platform: {last_platform_str}")
+        selected_manifest = image_manifests[0]
+        # We need to fetch the actual manifest content
+        digest = selected_manifest['digest']
+        manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
+        print(f"Fetching manifest from: {manifest_url}")
+        auth_head = get_auth_head(', '.join(accept_types))
+        resp = requests.get(manifest_url, headers=auth_head, verify=False)
+        if resp.status_code != 200:
+            print('Cannot fetch manifest [HTTP {}]'.format(resp.status_code))
+            print(f'Response: {resp.content}')
+            exit(1)
+        manifest = resp.json()
+    else:
+        print('Please specify a platform using --platform argument')
+        exit(1)
+
 # Create image directory
 imgdir = 'docker_{}_{}'.format(img, tag.replace(':', '_').replace('@', '_'))
 if os.path.exists(imgdir):
     shutil.rmtree(imgdir)
 os.makedirs(imgdir)
 
-# Get layers
-layers = manifest['layers']
+# Extract layers from manifest
+if 'layers' in manifest:
+    layers = manifest['layers']
+else:
+    print('Error: No layers found in manifest')
+    print(f'Manifest content: {manifest}')
+    exit(1)
 
 # Create repositories file
 repositories = '{{"{}":{{"{}":"{}"}}}}'.format(repo, img, tag)
