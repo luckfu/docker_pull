@@ -10,6 +10,12 @@ import sys
 import platform
 from pathlib import Path
 
+# 设置输出编码，避免Windows上的编码问题
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
 def get_platform_icon():
     """根据当前平台返回合适的图标文件名"""
     system = platform.system().lower()
@@ -43,8 +49,8 @@ def create_cross_platform_spec(template_spec, output_spec):
     with open(output_spec, 'w', encoding='utf-8') as f:
         f.write(content)
     
-    print(f"✅ 已创建跨平台spec文件: {output_spec}")
-    print(f"📱 使用图标: {icon_file}")
+    print(f"Created cross-platform spec file: {output_spec}")
+    print(f"Using icon: {icon_file}")
 
 def check_icon_files():
     """检查图标文件是否存在"""
@@ -57,45 +63,45 @@ def check_icon_files():
         'icon.png': '通用格式（可转换）'
     }
     
-    print("🔍 检查图标文件:")
+    print("Checking icon files:")
     found_icons = []
     
     for icon_file, description in icon_files.items():
         if (current_dir / icon_file).exists():
             size = (current_dir / icon_file).stat().st_size
-            print(f"  ✅ {icon_file} ({size} bytes) - {description}")
+            print(f"  OK: {icon_file} ({size} bytes) - {description}")
             found_icons.append(icon_file)
         else:
-            print(f"  ❌ {icon_file} - {description}")
+            print(f"  Missing: {icon_file} - {description}")
     
     return found_icons
 
 def create_icon_recommendations():
     """提供图标创建建议"""
-    print("\n💡 图标文件建议:")
-    print("  📏 推荐尺寸: 256x256 像素")
-    print("  🎨 格式支持:")
-    print("     • Windows: .ico (多尺寸图标)")
-    print("     • macOS: .icns (Apple图标格式)")
-    print("     • Linux: .ico 或 .png")
-    print("\n🛠️  在线转换工具:")
-    print("     • https://convertio.co/png-ico/")
-    print("     • https://iconverticons.com/online/")
-    print("\n📦 如果你有PNG图标，可以使用以下命令转换:")
-    print("     # 安装Pillow")
+    print("\nIcon file recommendations:")
+    print("  Recommended size: 256x256 pixels")
+    print("  Format support:")
+    print("     - Windows: .ico (multi-size icon)")
+    print("     - macOS: .icns (Apple icon format)")
+    print("     - Linux: .ico or .png")
+    print("\nOnline conversion tools:")
+    print("     - https://convertio.co/png-ico/")
+    print("     - https://iconverticons.com/online/")
+    print("\nIf you have a PNG icon, convert it with:")
+    print("     # Install Pillow")
     print("     pip install Pillow")
-    print("     # 转换为ico")
+    print("     # Convert to ico")
     print("     python -c \"from PIL import Image; Image.open('icon.png').save('icon.ico')\"")
 
 def main():
-    print("🎯 Docker Pull 图标配置工具")
+    print("Docker Pull Icon Configuration Tool")
     print("=" * 40)
     
     # 检查图标文件
     found_icons = check_icon_files()
     
     if not found_icons:
-        print("\n⚠️  未找到任何图标文件！")
+        print("\nWarning: No icon files found!")
         create_icon_recommendations()
         return
     
@@ -103,16 +109,16 @@ def main():
     current_platform = platform.system()
     recommended_icon = get_platform_icon()
     
-    print(f"\n🖥️  当前平台: {current_platform}")
-    print(f"📱 推荐图标: {recommended_icon}")
+    print(f"\nCurrent platform: {current_platform}")
+    print(f"Recommended icon: {recommended_icon}")
     
     # 检查推荐图标是否存在
     if recommended_icon in found_icons:
-        print(f"✅ 推荐图标文件存在: {recommended_icon}")
+        print(f"OK: Recommended icon file exists: {recommended_icon}")
     else:
-        print(f"⚠️  推荐图标文件不存在: {recommended_icon}")
+        print(f"Warning: Recommended icon file not found: {recommended_icon}")
         if 'icon.ico' in found_icons:
-            print("💡 将使用 icon.ico 作为备选")
+            print("Info: Will use icon.ico as fallback")
     
     # 创建跨平台spec文件
     spec_files = [
@@ -126,10 +132,10 @@ def main():
             try:
                 create_cross_platform_spec(spec_file, output_file)
             except Exception as e:
-                print(f"❌ 处理 {spec_file} 时出错: {e}")
+                print(f"Error processing {spec_file}: {e}")
     
-    print("\n🎉 图标配置完成！")
-    print("\n📝 使用方法:")
+    print("\nIcon configuration completed!")
+    print("\nUsage:")
     print("   pyinstaller docker_pull_platform.spec")
     print("   pyinstaller docker_pull_ultra_optimized_platform.spec")
 
