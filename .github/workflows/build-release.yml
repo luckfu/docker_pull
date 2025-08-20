@@ -20,11 +20,11 @@ jobs:
             platform: windows
             arch: x64
             executable: docker_pull.exe
-          - os: macos-latest
+          - os: macos-13
             platform: macos
             arch: x64
             executable: docker_pull
-          - os: macos-latest
+          - os: macos-14
             platform: macos
             arch: arm64
             executable: docker_pull
@@ -33,9 +33,9 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: '3.11'
     
     - name: Install dependencies
       run: |
@@ -65,7 +65,7 @@ jobs:
         7z a docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.zip docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe
     
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
         path: |
@@ -81,9 +81,10 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Download all artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: artifacts
+        merge-multiple: true
     
     - name: Create Release
       uses: softprops/action-gh-release@v1
