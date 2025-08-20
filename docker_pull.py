@@ -55,7 +55,7 @@ __url__ = "https://github.com/luckfu/docker_pull"
 def show_version():
     """显示版本和版权信息"""
     print(f"Docker Pull v{__version__}")
-    print(f"高性能Docker镜像下载工具，支持多平台、并发下载、智能缓存")
+    print(f"Docker镜像下载工具，支持多平台、并发下载、智能缓存")
     print(f"{__copyright__}")
     print(f"开源项目: {__url__}")
     print(f"许可证: {__license__}")
