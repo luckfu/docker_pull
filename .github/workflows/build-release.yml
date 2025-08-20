@@ -1,0 +1,98 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            executable: docker_pull
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            executable: docker_pull.exe
+          - os: macos-latest
+            platform: macos
+            arch: x64
+            executable: docker_pull
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            executable: docker_pull
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Build with PyInstaller (Linux/macOS)
+      if: matrix.platform != 'windows'
+      run: |
+        pyinstaller --onefile --name docker_pull_${{ matrix.platform }}_${{ matrix.arch }} docker_pull.py
+    
+    - name: Build with PyInstaller (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        pyinstaller --onefile --name docker_pull_${{ matrix.platform }}_${{ matrix.arch }} docker_pull.py
+    
+    - name: Create archive (Linux/macOS)
+      if: matrix.platform != 'windows'
+      run: |
+        cd dist
+        tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
+    
+    - name: Create archive (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        cd dist
+        7z a docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.zip docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
+        path: |
+          dist/*.tar.gz
+          dist/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/**/*.tar.gz
+          artifacts/**/*.zip
+        generate_release_notes: true
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
