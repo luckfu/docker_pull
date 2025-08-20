@@ -89,9 +89,22 @@ jobs:
     - name: Build with PyInstaller (Windows)
       if: matrix.platform == 'windows'
       run: |
-        # Use fixed icon spec file with absolute paths and multi-size icon
-        pyinstaller docker_pull_fixed_icon.spec
-        Move-Item -Path "dist\docker_pull.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe"
+        # Clear PyInstaller cache to avoid icon caching issues
+        if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+        if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
+        
+        # Use direct command line approach for better Windows icon support
+        pyinstaller --onefile --console --icon="icon_new.ico" --version-file="version_info.txt" --name="docker_pull_${{ matrix.platform }}_${{ matrix.arch }}" docker_pull.py
+        
+        # Verify the icon was applied
+        Write-Host "Checking if icon was applied to the executable..."
+        if (Test-Path "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe") {
+          Write-Host "✅ Executable created successfully"
+          $fileInfo = Get-ItemProperty "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe"
+          Write-Host "File size: $($fileInfo.Length) bytes"
+        } else {
+          Write-Host "❌ Executable not found"
+        }
       shell: pwsh
     
     - name: Create archive (Linux/macOS)
