@@ -12,12 +12,38 @@ import argparse
 import threading
 import time
 import base64
+import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
 from typing import Optional, Dict, Any
 import urllib.parse
 from pathlib import Path
 urllib3.disable_warnings()
+
+# 全局变量用于优雅退出
+shutdown_event = threading.Event()
+executor = None
+
+def signal_handler(signum, frame):
+    """处理Ctrl+C信号"""
+    print("\n\n⚠️  接收到中断信号，正在优雅退出...")
+    print("📋 清理下载任务和临时文件...")
+    
+    # 设置关闭事件
+    shutdown_event.set()
+    
+    # 关闭线程池
+    if executor:
+        print("🔄 等待下载任务完成...")
+        executor.shutdown(wait=False)
+    
+    print("✅ 清理完成，程序退出")
+    sys.exit(0)
+
+# 注册信号处理器
+signal.signal(signal.SIGINT, signal_handler)
+if hasattr(signal, 'SIGTERM'):
+    signal.signal(signal.SIGTERM, signal_handler)
 
 # 版本和版权信息
 __version__ = "1.1.1"
@@ -396,6 +422,10 @@ def progress_bar(ublob, downloaded, total, start_time):
 @retry(max_attempts=3, delay=1.0, backoff=2.0)
 def download_layer(layer, imgdir, parentid):
     """Download a single layer in a separate thread with streaming and progress"""
+    # 检查是否收到中断信号
+    if shutdown_event.is_set():
+        raise KeyboardInterrupt("Download interrupted by user")
+    
     ublob = layer['digest']
     fake_layerid = hashlib.sha256((parentid+'\n'+ublob+'\n').encode('utf-8')).hexdigest()
     layerdir = imgdir + '/' + fake_layerid
@@ -432,9 +462,15 @@ def download_layer(layer, imgdir, parentid):
     bresp = None
     for url in urls:
         try:
+            # 检查中断信号
+            if shutdown_event.is_set():
+                raise KeyboardInterrupt("Download interrupted by user")
+                
             bresp = session.get(url, headers=auth_head, stream=True, verify=False, timeout=30)
             if bresp.status_code == 200:
                 break
+        except KeyboardInterrupt:
+            raise
         except requests.RequestException:
             continue
     else:
@@ -447,38 +483,59 @@ def download_layer(layer, imgdir, parentid):
     downloaded = 0
     last_update = 0
 
-    # Stream directly to file without loading entire content in memory
-    with open(layerdir + '/layer_gzip.tar', 'wb') as file:
-        for chunk in bresp.iter_content(chunk_size=1024*1024):  # 1MB chunks
-            if chunk:
-                file.write(chunk)
-                downloaded += len(chunk)
+    try:
+        # Stream directly to file without loading entire content in memory
+        with open(layerdir + '/layer_gzip.tar', 'wb') as file:
+            for chunk in bresp.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                # 检查中断信号
+                if shutdown_event.is_set():
+                    bresp.close()
+                    raise KeyboardInterrupt("Download interrupted by user")
+                    
+                if chunk:
+                    file.write(chunk)
+                    downloaded += len(chunk)
 
-                # Update progress every 100ms
-                current_time = time.time()
-                if current_time - last_update > 0.1:
-                    with progress_lock:
-                        progress_bar(ublob, downloaded, content_length, start_time)
-                    last_update = current_time
+                    # Update progress every 100ms
+                    current_time = time.time()
+                    if current_time - last_update > 0.1:
+                        with progress_lock:
+                            progress_bar(ublob, downloaded, content_length, start_time)
+                        last_update = current_time
 
-    with progress_lock:
-        print(f'{ublob[7:19]}: Download complete ({format_speed(downloaded)})')
-        print(f'{ublob[7:19]}: Extracting...')
-
-    # Stream decompress to avoid memory issues
-    with open(layerdir + '/layer.tar', 'wb') as out_file:
-        with gzip.open(layerdir + '/layer_gzip.tar', 'rb') as gz_file:
-            shutil.copyfileobj(gz_file, out_file)  # type: ignore
-
-    os.remove(layerdir + '/layer_gzip.tar')
-    
-    # Save to cache after successful download and extraction
-    layer_tar_path = layerdir + '/layer.tar'
-    if save_layer_to_cache(ublob, layer_tar_path):
         with progress_lock:
-            print(f'{ublob[7:19]}: Cached for future use')
-    
-    return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
+            print(f'{ublob[7:19]}: Download complete ({format_speed(downloaded)})')
+            print(f'{ublob[7:19]}: Extracting...')
+
+        # Stream decompress to avoid memory issues
+        with open(layerdir + '/layer.tar', 'wb') as out_file:
+            with gzip.open(layerdir + '/layer_gzip.tar', 'rb') as gz_file:
+                shutil.copyfileobj(gz_file, out_file)  # type: ignore
+
+        os.remove(layerdir + '/layer_gzip.tar')
+        
+        # Save to cache after successful download and extraction
+        layer_tar_path = layerdir + '/layer.tar'
+        if save_layer_to_cache(ublob, layer_tar_path):
+            with progress_lock:
+                print(f'{ublob[7:19]}: Cached for future use')
+        
+        return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
+        
+    except KeyboardInterrupt:
+        # 清理部分下载的文件
+        if os.path.exists(layerdir + '/layer_gzip.tar'):
+            os.remove(layerdir + '/layer_gzip.tar')
+        if os.path.exists(layerdir + '/layer.tar'):
+            os.remove(layerdir + '/layer.tar')
+        raise
+    except Exception as e:
+        # 清理部分下载的文件
+        if os.path.exists(layerdir + '/layer_gzip.tar'):
+            os.remove(layerdir + '/layer_gzip.tar')
+        if os.path.exists(layerdir + '/layer.tar'):
+            os.remove(layerdir + '/layer.tar')
+        raise RetryError(f'Error downloading layer {ublob[7:19]}: {str(e)}')
 
 # Main execution continues...
 # Get Docker authentication
@@ -493,16 +550,23 @@ accept_types = [
 auth_head = get_auth_head(', '.join(accept_types))
 
 # Get manifest
-resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, tag), headers=auth_head, verify=False)
-if resp.status_code != 200:
-    print('Cannot fetch manifest for {} [HTTP {}]'.format(repository, resp.status_code))
-    if resp.status_code == 401:
-        print('Authentication failed. Please check your credentials.')
-        if not username or not password:
-            print('Private registry requires authentication. Use --username and --password arguments.')
-    elif resp.status_code == 403:
-        print('Access forbidden. You may not have permission to access this image.')
-    print(resp.content)
+try:
+    resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, tag), headers=auth_head, verify=False, timeout=30)
+    if resp.status_code != 200:
+        print('Cannot fetch manifest for {} [HTTP {}]'.format(repository, resp.status_code))
+        if resp.status_code == 401:
+            print('Authentication failed. Please check your credentials.')
+            if not username or not password:
+                print('Private registry requires authentication. Use --username and --password arguments.')
+        elif resp.status_code == 403:
+            print('Access forbidden. You may not have permission to access this image.')
+        print(resp.content)
+        exit(1)
+except KeyboardInterrupt:
+    print('\n⚠️  获取镜像清单时被用户中断')
+    sys.exit(0)
+except requests.exceptions.RequestException as e:
+    print(f'Network error fetching manifest: {e}')
     exit(1)
 
 manifest = resp.json()
@@ -616,19 +680,44 @@ with open(imgdir + '/repositories', 'w') as f:
 
 # Download layers concurrently
 print('Downloading {} layers...'.format(len(layers)))
-with ThreadPoolExecutor(max_workers=max_concurrent_downloads) as executor:
-    future_to_layer = {executor.submit(download_layer, layer, imgdir, 'sha256:' + hashlib.sha256(''.encode()).hexdigest()): layer for layer in layers}
-    
-    for future in as_completed(future_to_layer):
-        layer = future_to_layer[future]
-        try:
-            result = future.result()
-            if result:
-                print('{}: Layer {} completed'.format(result['fake_layerid'][:12], result['layer']['digest'][7:19]))
-            else:
-                print('ERROR: Failed to download layer {}'.format(layer['digest'][7:19]))
-        except Exception as e:
-            print('ERROR: Exception downloading layer {}: {}'.format(layer['digest'][7:19], str(e)))
+print('💡 提示: 按 Ctrl+C 可以随时中断下载\n')
+
+try:
+    with ThreadPoolExecutor(max_workers=max_concurrent_downloads) as thread_executor:
+        executor = thread_executor
+        
+        future_to_layer = {thread_executor.submit(download_layer, layer, imgdir, 'sha256:' + hashlib.sha256(''.encode()).hexdigest()): layer for layer in layers}
+
+        for future in as_completed(future_to_layer):
+            # 检查中断信号
+            if shutdown_event.is_set():
+                print('\n⚠️  下载已被用户中断')
+                break
+                
+            layer = future_to_layer[future]
+            try:
+                result = future.result()
+                if result:
+                    print('{}: Layer {} completed'.format(result['fake_layerid'][:12], result['layer']['digest'][7:19]))
+                else:
+                    print('ERROR: Failed to download layer {}'.format(layer['digest'][7:19]))
+            except KeyboardInterrupt:
+                print('\n⚠️  下载被用户中断')
+                break
+            except Exception as e:
+                print('ERROR: Exception downloading layer {}: {}'.format(layer['digest'][7:19], str(e)))
+        
+        # 清除全局executor引用
+        executor = None
+        
+except KeyboardInterrupt:
+    print('\n\n⚠️  下载被用户中断，正在清理...')
+    # 清理临时目录
+    if os.path.exists(imgdir):
+        shutil.rmtree(imgdir)
+        print(f'🗑️  已清理临时目录: {imgdir}')
+    print('✅ 清理完成，程序退出')
+    sys.exit(0)
 
 # Create manifest.json
 manifest_json = [{
