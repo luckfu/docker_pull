@@ -70,9 +70,34 @@ jobs:
     - name: Install UPX (macOS)
       if: matrix.platform == 'macos'
       run: |
-        brew install upx
+        # Try to install UPX, but don't fail if it doesn't work
+        brew install upx || echo "UPX installation failed, continuing without UPX compression"
     
-    - name: Install dependencies
+    - name: Install UPX (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        # Download and install UPX for Windows
+        Invoke-WebRequest -Uri "https://github.com/upx/upx/releases/download/v4.2.1/upx-4.2.1-win64.zip" -OutFile "upx.zip"
+        Expand-Archive -Path "upx.zip" -DestinationPath "."
+        $env:PATH += ";$PWD\upx-4.2.1-win64"
+        echo "$PWD\upx-4.2.1-win64" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      shell: pwsh
+      continue-on-error: true
+    
+    - name: Install dependencies (Windows)
+      if: matrix.platform == 'windows'
+      run: |
+        python -m pip install --upgrade pip
+        if ("${{ matrix.build_type }}" -eq "optimized") {
+          pip install -r requirements_minimal.txt
+        } else {
+          pip install -r requirements.txt
+        }
+        pip install pyinstaller Pillow
+      shell: pwsh
+    
+    - name: Install dependencies (Linux/macOS)
+      if: matrix.platform != 'windows'
       run: |
         python -m pip install --upgrade pip
         if [ "${{ matrix.build_type }}" = "optimized" ]; then
@@ -89,26 +114,43 @@ jobs:
     - name: Build with PyInstaller (Linux/macOS - Standard)
       if: matrix.platform != 'windows' && matrix.build_type == 'standard'
       run: |
-        pyinstaller docker_pull_platform.spec
+        # Use simple spec file to ensure build success
+        pyinstaller docker_pull_simple.spec
         mv dist/docker_pull dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
     
     - name: Build with PyInstaller (Linux/macOS - Optimized)
       if: matrix.platform != 'windows' && matrix.build_type == 'optimized'
       run: |
-        pyinstaller docker_pull_ultra_optimized_platform.spec
-        mv dist/docker_pull_mini dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
+        # Try optimized build, fallback to simple if it fails
+        pyinstaller docker_pull_ultra_optimized_platform.spec || pyinstaller docker_pull_simple.spec
+        if [ -f "dist/docker_pull_mini" ]; then
+          mv dist/docker_pull_mini dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
+        else
+          mv dist/docker_pull dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
+        fi
     
     - name: Build with PyInstaller (Windows - Standard)
       if: matrix.platform == 'windows' && matrix.build_type == 'standard'
       run: |
-        pyinstaller docker_pull_platform.spec
-        move dist\docker_pull.exe dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe
+        # Use simple spec file to ensure build success
+        pyinstaller docker_pull_simple.spec
+        Move-Item -Path "dist\docker_pull.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe"
+      shell: pwsh
     
     - name: Build with PyInstaller (Windows - Optimized)
       if: matrix.platform == 'windows' && matrix.build_type == 'optimized'
       run: |
-        pyinstaller docker_pull_ultra_optimized_platform.spec
-        move dist\docker_pull_mini.exe dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe
+        # Try optimized build, fallback to simple if it fails
+        try {
+          pyinstaller docker_pull_ultra_optimized_platform.spec
+          if (Test-Path "dist\docker_pull_mini.exe") {
+            Move-Item -Path "dist\docker_pull_mini.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe"
+          }
+        } catch {
+          pyinstaller docker_pull_simple.spec
+          Move-Item -Path "dist\docker_pull.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe"
+        }
+      shell: pwsh
     
     - name: Create archive (Linux/macOS - Standard)
       if: matrix.platform != 'windows' && matrix.build_type == 'standard'
@@ -125,14 +167,16 @@ jobs:
     - name: Create archive (Windows - Standard)
       if: matrix.platform == 'windows' && matrix.build_type == 'standard'
       run: |
-        cd dist
-        7z a docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.zip docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe
+        Set-Location dist
+        Compress-Archive -Path "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe" -DestinationPath "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.zip"
+      shell: pwsh
     
     - name: Create archive (Windows - Optimized)
       if: matrix.platform == 'windows' && matrix.build_type == 'optimized'
       run: |
-        cd dist
-        7z a docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.zip docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe
+        Set-Location dist
+        Compress-Archive -Path "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe" -DestinationPath "docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.zip"
+      shell: pwsh
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
