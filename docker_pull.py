@@ -38,7 +38,7 @@ def show_version():
 def show_banner():
     """显示启动横幅"""
     print("="*60)
-    print(f"🐳 Docker Pull v{__version__} - 高性能镜像下载工具")
+    print(f"🐳 Docker Pull v{__version__} - Docke容器镜像下载工具")
     print(f"📦 来自开源项目: {__url__}")
     print(f"⚡ 支持多平台、并发下载、智能缓存")
     print("="*60)
@@ -46,7 +46,7 @@ def show_banner():
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(
-    description='高性能Docker镜像下载工具，支持多平台、并发下载、智能缓存',
+    description='不需要Docker环境的镜像下载工具，支持多平台、并发下载、智能缓存',
     epilog=f'开源项目: {__url__}',
     formatter_class=argparse.RawDescriptionHelpFormatter
 )
