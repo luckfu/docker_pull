@@ -1,16 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+
 a = Analysis(
     ['docker_pull.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['requests', 'json', 'threading', 'argparse'],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
+    optimize=0,
 )
 pyz = PYZ(a.pure)
 
@@ -33,6 +35,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',  # 添加图标
-    version='version_info.txt'  # 添加版本信息
+    version='/Users/fupengcheng/Documents/docker_pull/version_info.txt',
+    icon=['/Users/fupengcheng/Documents/docker_pull/icon.ico'],
 )

@@ -82,15 +82,15 @@ jobs:
     - name: Build with PyInstaller (Linux/macOS)
       if: matrix.platform != 'windows'
       run: |
-        # Use simple spec file with proper icon configuration
-        pyinstaller docker_pull_simple.spec
+        # Use fixed icon spec file with absolute paths
+        pyinstaller docker_pull_fixed_icon.spec
         mv dist/docker_pull dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
     
     - name: Build with PyInstaller (Windows)
       if: matrix.platform == 'windows'
       run: |
-        # Use simple spec file with proper icon configuration
-        pyinstaller docker_pull_simple.spec
+        # Use fixed icon spec file with absolute paths and multi-size icon
+        pyinstaller docker_pull_fixed_icon.spec
         Move-Item -Path "dist\docker_pull.exe" -Destination "dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe"
       shell: pwsh
     

@@ -1,9 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 简化版PyInstaller配置，确保构建成功
+# 修复图标问题的PyInstaller配置文件
+
+import os
+
+# 获取绝对路径
+base_dir = os.path.abspath('.')
+icon_path = os.path.join(base_dir, 'icon_new.ico')  # 使用多尺寸图标
+version_path = os.path.join(base_dir, 'version_info.txt')
 
 a = Analysis(
     ['docker_pull.py'],
-    pathex=[],
+    pathex=[base_dir],
     binaries=[],
     datas=[],
     hiddenimports=[
@@ -44,6 +51,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',    # 添加图标
-    version='version_info.txt',  # 添加版本信息
+    icon=icon_path,     # 使用绝对路径的多尺寸图标
+    version=version_path,  # 使用绝对路径的版本信息
 )

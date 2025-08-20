@@ -20,7 +20,7 @@ VSVersionInfo(
            StringStruct(u'ProductName', u'Docker Pull'),
            StringStruct(u'ProductVersion', u'1.1.1'),
            StringStruct(u'LegalCopyright', u'Copyright © 2024 luckfu. 开源项目: https://github.com/luckfu/docker_pull'),
-           StringStruct(u'Comments', u'高性能Docker镜像下载工具 - 来自 https://github.com/luckfu/docker_pull 开源项目'),
+           StringStruct(u'Comments', u'不需要安装Docker的镜像下载工具 - https://github.com/luckfu/docker_pull 开源项目'),
            StringStruct(u'InternalName', u'docker_pull'),
            StringStruct(u'OriginalFilename', u'docker_pull.exe'),
            StringStruct(u'LegalTrademarks', u''),
