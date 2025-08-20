@@ -16,18 +16,42 @@ jobs:
             platform: linux
             arch: x64
             executable: docker_pull
+            build_type: standard
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            executable: docker_pull_mini
+            build_type: optimized
           - os: windows-latest
             platform: windows
             arch: x64
             executable: docker_pull.exe
+            build_type: standard
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            executable: docker_pull_mini.exe
+            build_type: optimized
           - os: macos-13
             platform: macos
             arch: x64
             executable: docker_pull
+            build_type: standard
+          - os: macos-13
+            platform: macos
+            arch: x64
+            executable: docker_pull_mini
+            build_type: optimized
           - os: macos-14
             platform: macos
             arch: arm64
             executable: docker_pull
+            build_type: standard
+          - os: macos-14
+            platform: macos
+            arch: arm64
+            executable: docker_pull_mini
+            build_type: optimized
 
     steps:
     - uses: actions/checkout@v4
@@ -37,37 +61,77 @@ jobs:
       with:
         python-version: '3.11'
     
+    - name: Install UPX (Linux)
+      if: matrix.platform == 'linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y upx-ucl
+    
+    - name: Install UPX (macOS)
+      if: matrix.platform == 'macos'
+      run: |
+        brew install upx
+    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        if [ "${{ matrix.build_type }}" = "optimized" ]; then
+          pip install -r requirements_minimal.txt
+        else
+          pip install -r requirements.txt
+        fi
+        pip install pyinstaller
     
-    - name: Build with PyInstaller (Linux/macOS)
-      if: matrix.platform != 'windows'
+    - name: Build with PyInstaller (Linux/macOS - Standard)
+      if: matrix.platform != 'windows' && matrix.build_type == 'standard'
       run: |
         pyinstaller --onefile --name docker_pull_${{ matrix.platform }}_${{ matrix.arch }} docker_pull.py
     
-    - name: Build with PyInstaller (Windows)
-      if: matrix.platform == 'windows'
+    - name: Build with PyInstaller (Linux/macOS - Optimized)
+      if: matrix.platform != 'windows' && matrix.build_type == 'optimized'
+      run: |
+        pyinstaller docker_pull_ultra_optimized.spec
+        mv dist/docker_pull_mini dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
+    
+    - name: Build with PyInstaller (Windows - Standard)
+      if: matrix.platform == 'windows' && matrix.build_type == 'standard'
       run: |
         pyinstaller --onefile --name docker_pull_${{ matrix.platform }}_${{ matrix.arch }} docker_pull.py
     
-    - name: Create archive (Linux/macOS)
-      if: matrix.platform != 'windows'
+    - name: Build with PyInstaller (Windows - Optimized)
+      if: matrix.platform == 'windows' && matrix.build_type == 'optimized'
+      run: |
+        pyinstaller docker_pull_ultra_optimized.spec
+        move dist\docker_pull_mini.exe dist\docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe
+    
+    - name: Create archive (Linux/macOS - Standard)
+      if: matrix.platform != 'windows' && matrix.build_type == 'standard'
       run: |
         cd dist
         tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
     
-    - name: Create archive (Windows)
-      if: matrix.platform == 'windows'
+    - name: Create archive (Linux/macOS - Optimized)
+      if: matrix.platform != 'windows' && matrix.build_type == 'optimized'
+      run: |
+        cd dist
+        tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini
+    
+    - name: Create archive (Windows - Standard)
+      if: matrix.platform == 'windows' && matrix.build_type == 'standard'
       run: |
         cd dist
         7z a docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.zip docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.exe
     
+    - name: Create archive (Windows - Optimized)
+      if: matrix.platform == 'windows' && matrix.build_type == 'optimized'
+      run: |
+        cd dist
+        7z a docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.zip docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_mini.exe
+    
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
+        name: docker_pull_${{ matrix.platform }}_${{ matrix.arch }}_${{ matrix.build_type }}
         path: |
           dist/*.tar.gz
           dist/*.zip
