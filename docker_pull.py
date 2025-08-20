@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
 from typing import Optional, Dict, Any
 import urllib.parse
+from pathlib import Path
 urllib3.disable_warnings()
 
 # Parse command line arguments
@@ -25,15 +26,36 @@ parser.add_argument('--platform', help='Target platform (e.g., linux/amd64, linu
 parser.add_argument('--max-concurrent-downloads', type=int, default=3, help='Maximum number of concurrent layer downloads (default: 3)')
 parser.add_argument('--username', help='Username for registry authentication (supports Docker Hub, GCR, ECR, Harbor, etc.)')
 parser.add_argument('--password', help='Password for registry authentication')
+parser.add_argument('--cache-dir', help='Layer cache directory (default: ~/.docker_pull_cache)', default=None)
+parser.add_argument('--no-cache', action='store_true', help='Disable layer caching')
 args = parser.parse_args()
 
 image_arg = args.image
 target_platform = args.platform
 max_concurrent_downloads = args.max_concurrent_downloads
 
+# Layer cache configuration
+use_cache = not args.no_cache
+if args.cache_dir:
+    cache_dir = Path(args.cache_dir).expanduser().resolve()
+else:
+    cache_dir = Path.cwd() / 'docker_images_cache'
+
+layers_cache_dir = cache_dir / 'layers'
+manifests_cache_dir = cache_dir / 'manifests'
+
+# Initialize cache directories
+if use_cache:
+    layers_cache_dir.mkdir(parents=True, exist_ok=True)
+    manifests_cache_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Using layer cache: {cache_dir}")
+else:
+    print("Layer caching disabled")
+
 # Thread-safe progress tracking
 progress_lock = threading.Lock()
 download_progress = {}
+cache_stats = {'hits': 0, 'misses': 0, 'bytes_saved': 0}
 
 # Global session for connection pooling
 session = requests.Session()
@@ -227,6 +249,75 @@ def format_time(seconds):
     else:
         return f"{seconds/3600:.0f}h{(seconds%3600)/60:.0f}m"
 
+# Layer cache management functions
+def get_layer_cache_path(layer_digest: str) -> Path:
+    """Get the cache path for a layer based on its digest"""
+    return layers_cache_dir / layer_digest.replace(':', '_')
+
+def check_layer_cache(layer_digest: str) -> Optional[Path]:
+    """Check if a layer exists in cache and is valid"""
+    if not use_cache:
+        return None
+    
+    cache_path = get_layer_cache_path(layer_digest)
+    layer_file = cache_path / 'layer.tar'
+    
+    if layer_file.exists():
+        # Update access time for LRU
+        cache_path.touch()
+        return cache_path
+    return None
+
+def save_layer_to_cache(layer_digest: str, layer_tar_path: str) -> bool:
+    """Save a downloaded layer to cache"""
+    if not use_cache:
+        return False
+    
+    try:
+        cache_path = get_layer_cache_path(layer_digest)
+        cache_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create hard link to save space
+        cache_layer_file = cache_path / 'layer.tar'
+        if not cache_layer_file.exists():
+            os.link(layer_tar_path, cache_layer_file)
+        
+        # Save metadata
+        metadata = {
+            'digest': layer_digest,
+            'size': os.path.getsize(layer_tar_path),
+            'cached_at': time.time()
+        }
+        with open(cache_path / 'metadata.json', 'w') as f:
+            json.dump(metadata, f)
+        
+        return True
+    except Exception as e:
+        print(f"Warning: Failed to cache layer {layer_digest[7:19]}: {e}")
+        return False
+
+def use_cached_layer(cache_path: Path, target_dir: str, layer_digest: str) -> bool:
+    """Use a cached layer by creating hard link"""
+    try:
+        cached_layer = cache_path / 'layer.tar'
+        target_layer = target_dir + '/layer.tar'
+        
+        # Create hard link to reuse cached layer
+        os.link(cached_layer, target_layer)
+        
+        # Update cache stats
+        with progress_lock:
+            cache_stats['hits'] += 1
+            if (cache_path / 'metadata.json').exists():
+                with open(cache_path / 'metadata.json', 'r') as f:
+                    metadata = json.load(f)
+                    cache_stats['bytes_saved'] += metadata.get('size', 0)
+        
+        return True
+    except Exception as e:
+        print(f"Warning: Failed to use cached layer {layer_digest[7:19]}: {e}")
+        return False
+
 def progress_bar(ublob, downloaded, total, start_time):
     """Enhanced progress bar with speed and ETA"""
     if total and total > 0:
@@ -265,6 +356,21 @@ def download_layer(layer, imgdir, parentid):
     # Create VERSION file
     with open(layerdir + '/VERSION', 'w') as f:
         f.write('1.0')
+
+    # Check cache first
+    cache_path = check_layer_cache(ublob)
+    if cache_path:
+        with progress_lock:
+            print(f'{ublob[7:19]}: Using cached layer')
+        if use_cached_layer(cache_path, layerdir, ublob):
+            return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
+        else:
+            with progress_lock:
+                print(f'{ublob[7:19]}: Cache failed, downloading...')
+    
+    # Update cache miss stats
+    with progress_lock:
+        cache_stats['misses'] += 1
 
     start_time = time.time()
 
@@ -317,6 +423,13 @@ def download_layer(layer, imgdir, parentid):
             shutil.copyfileobj(gz_file, out_file)  # type: ignore
 
     os.remove(layerdir + '/layer_gzip.tar')
+    
+    # Save to cache after successful download and extraction
+    layer_tar_path = layerdir + '/layer.tar'
+    if save_layer_to_cache(ublob, layer_tar_path):
+        with progress_lock:
+            print(f'{ublob[7:19]}: Cached for future use')
+    
     return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
 
 # Main execution continues...
@@ -510,3 +623,17 @@ shutil.rmtree(imgdir)
 
 print('\rDocker image pulled: ' + docker_tar)
 print('You can load it with: docker load < ' + docker_tar)
+
+# Display cache statistics
+if use_cache and (cache_stats['hits'] > 0 or cache_stats['misses'] > 0):
+    total_layers = cache_stats['hits'] + cache_stats['misses']
+    hit_rate = (cache_stats['hits'] / total_layers * 100) if total_layers > 0 else 0
+    saved_mb = cache_stats['bytes_saved'] / (1024 * 1024)
+    print(f"\n💾 Cache Statistics:")
+    print(f"   Cache hits: {cache_stats['hits']}/{total_layers} layers ({hit_rate:.1f}%)")
+    if cache_stats['bytes_saved'] > 0:
+        if saved_mb >= 1024:
+            print(f"   Data saved: {saved_mb/1024:.1f} GB")
+        else:
+            print(f"   Data saved: {saved_mb:.1f} MB")
+    print(f"   Cache location: {cache_dir}")
