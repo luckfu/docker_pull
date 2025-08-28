@@ -1,103 +1,112 @@
+<p align="center">
+  <a href="./README.md"><img alt="README in English" src="https://img.shields.io/badge/English-d9d9d9"></a>
+  <a href="./README_CN.md"><img alt="简体中文版自述文件" src="https://img.shields.io/badge/简体中文-d9d9d9"></a>
+  <a href="./README_TW.md"><img alt="繁體中文文件" src="https://img.shields.io/badge/繁體中文-d9d9d9"></a>
+  <a href="./README_JA.md"><img alt="日本語のREADME" src="https://img.shields.io/badge/日本語-d9d9d9"></a>
+  <a href="./README_ES.md"><img alt="README en Español" src="https://img.shields.io/badge/Español-d9d9d9"></a>
+  <a href="./README_KR.md"><img alt="README in Korean" src="https://img.shields.io/badge/한국어-d9d9d9"></a>
+</p>
+
 # Docker Pull Script
 
-不需要Docker环境的镜像下载工具，支持多平台、并发下载、智能缓存（layer增量更新）、认证登录。
+A Docker image download tool that doesn't require Docker environment, supporting multi-platform, concurrent downloads, intelligent caching (layer incremental updates), and authentication login.
 
-> 注意：本工具仅用于下载镜像，不支持构建、运行容器。
-> 可以直接在 release 页面下载预编译的二进制文件，无需安装Python环境。
-> 支持Windows、macOS、Linux系统。
+> Note: This tool is only for downloading images, does not support building or running containers.
+> You can directly download pre-compiled binary files from the release page without installing Python environment.
+> Supports Windows, macOS, Linux systems.
 
-## 🚀 功能特性
+## 🚀 Features
 
-### 核心功能
-- **多平台支持**: 自动识别并下载指定平台镜像（linux/amd64, linux/arm64, linux/arm/v7等）
-- **并发下载**: 多线程同时下载镜像层，速度提升30-50%
-- **智能缓存**: 基于SHA256的层缓存系统，增量更新节省带宽
-- **内存优化**: 流式下载，内存占用减少90%
-- **网络重试**: 智能重试机制，网络中断自动恢复
-- **进度显示**: 实时显示下载速度、进度百分比和剩余时间
-- **认证支持**: Docker登录认证，支持私有镜像源
+### Core Features
+- **Multi-platform Support**: Automatically identifies and downloads specified platform images (linux/amd64, linux/arm64, linux/arm/v7, etc.)
+- **Concurrent Downloads**: Multi-threaded simultaneous download of image layers, 30-50% speed improvement
+- **Intelligent Caching**: SHA256-based layer caching system, incremental updates save bandwidth
+- **Memory Optimization**: Streaming downloads, 90% reduction in memory usage
+- **Network Retry**: Intelligent retry mechanism, automatic recovery from network interruptions
+- **Progress Display**: Real-time display of download speed, progress percentage, and remaining time
+- **Authentication Support**: Docker login authentication, supports private image sources
 
-### 支持的镜像源
+### Supported Image Sources
 - ✅ **Docker Hub** (registry-1.docker.io)
 - ✅ **Google Container Registry** (gcr.io, us.gcr.io, eu.gcr.io, asia.gcr.io)
 - ✅ **AWS ECR** (amazonaws.com)
-- ✅ **Harbor** 私有仓库
+- ✅ **Harbor** Private Registry
 - ✅ **Quay.io**
-- ✅ **阿里云ACR** (registry.cn-shanghai.aliyuncs.com, registry.cn-beijing.aliyuncs.com)
-- ✅ **OCI兼容注册表** (支持OCI镜像索引格式)
+- ✅ **Alibaba Cloud ACR** (registry.cn-shanghai.aliyuncs.com, registry.cn-beijing.aliyuncs.com)
+- ✅ **OCI Compatible Registries** (supports OCI image index format)
 
-## 📦 安装使用
+## 📦 Installation and Usage
 
-### 系统要求
+### System Requirements
 - Python 3.6+
-- requests库
+- requests library
 
-### 安装依赖
+### Install Dependencies
 ```bash
 pip install requests
 ```
 
-### 基本命令
+### Basic Commands
 ```bash
-python docker_pull.py [镜像名] [选项]
+python docker_pull.py [image_name] [options]
 ```
 
-### 缓存功能
-- **自动缓存**: 下载的层自动缓存到 `./docker_images_cache/`
-- **增量更新**: 重复下载时自动复用已缓存的层
-- **跨镜像共享**: 不同镜像的相同层可以共享缓存
-- **缓存统计**: 显示缓存命中率和节省的数据量
+### Caching Features
+- **Auto Caching**: Downloaded layers are automatically cached to `./docker_images_cache/`
+- **Incremental Updates**: Automatically reuse cached layers on repeat downloads
+- **Cross-image Sharing**: Same layers from different images can share cache
+- **Cache Statistics**: Display cache hit rate and data saved
 
-## 🔧 使用示例
+## 🔧 Usage Examples
 
-### 1. 基础使用
+### 1. Basic Usage
 
-#### 下载公共镜像
+#### Download Public Images
 ```bash
-# 下载最新版nginx
+# Download latest nginx
 python docker_pull.py nginx:latest
 
-# 下载指定平台镜像
+# Download specific platform image
 python docker_pull.py --platform linux/arm64 ubuntu:20.04
 
-# 自定义并发数
+# Custom concurrency
 python docker_pull.py --max-concurrent-downloads 5 alpine:latest
 
-# 禁用缓存
+# Disable caching
 python docker_pull.py nginx:latest --no-cache
 
-# 自定义缓存目录
+# Custom cache directory
 python docker_pull.py nginx:latest --cache-dir /path/to/cache
 ```
 
-#### 下载私有镜像（登录认证）
+#### Download Private Images (Login Authentication)
 ```bash
-# Docker Hub登录
+# Docker Hub login
 python docker_pull.py library/ubuntu:latest \
   --username myuser --password mypass
 
-# 私有Harbor仓库
+# Private Harbor registry
 python docker_pull.py harbor.company.com/dev/app:v1.2.0 \
   --username devuser --password devpass
 
-# 使用环境变量（更安全）
+# Use environment variables (more secure)
 export USER=myuser
 export PASS=mypass
 python docker_pull.py private-image:latest \
   --username $USER --password $PASS
 ```
 
-### 2. 平台支持
+### 2. Platform Support
 
-支持的平台格式：
+Supported platform formats:
 - `linux/amd64` (x86_64)
 - `linux/arm64` (ARM64)
-- `linux/arm/v7` (ARM 32位)
+- `linux/arm/v7` (ARM 32-bit)
 - `linux/386` (x86)
 - `linux/ppc64le` (PowerPC)
 - `linux/s390x` (IBM Z)
 
-### 3. 完整命令行参数
+### 3. Complete Command Line Arguments
 
 ```bash
 python docker_pull.py [-h] [--platform PLATFORM]
@@ -106,43 +115,43 @@ python docker_pull.py [-h] [--platform PLATFORM]
                       [--cache-dir CACHE_DIR] [--no-cache]
                       image
 
-参数说明：
-- image: Docker镜像名称 [registry/][repository/]image[:tag|@digest]
-- --platform: 目标平台 (linux/amd64, linux/arm64, linux/arm/v7等)
-- --max-concurrent-downloads: 最大并发下载层数 (默认: 3)
-- --username: 用户名（私有镜像源认证）
-- --password: 密码（私有镜像源认证）
-- --cache-dir: 层缓存目录 (默认: ./docker_images_cache)
-- --no-cache: 禁用层缓存功能
+Arguments:
+- image: Docker image name [registry/][repository/]image[:tag|@digest]
+- --platform: Target platform (linux/amd64, linux/arm64, linux/arm/v7, etc.)
+- --max-concurrent-downloads: Maximum concurrent download layers (default: 3)
+- --username: Username (for private image source authentication)
+- --password: Password (for private image source authentication)
+- --cache-dir: Layer cache directory (default: ./docker_images_cache)
+- --no-cache: Disable layer caching feature
 ```
 
-## 📊 性能对比
+## 📊 Performance Comparison
 
-### 并发下载性能
-| 下载方式 | 耗时 | 性能提升 |
-|----------|------|----------|
-| 顺序下载（1线程） | 43.97秒 | 基准 |
-| **并发下载（3线程）** | **28.08秒** | **36.1%** |
-| 并发下载（5线程） | 18.91秒 | 57.0% |
+### Concurrent Download Performance
+| Download Method | Time | Performance Improvement |
+|-----------------|------|------------------------|
+| Sequential Download (1 thread) | 43.97s | Baseline |
+| **Concurrent Download (3 threads)** | **28.08s** | **36.1%** |
+| Concurrent Download (5 threads) | 18.91s | 57.0% |
 
-### 缓存功能效果
-| 场景 | 首次下载 | 重复下载 | 缓存命中率 | 节省数据 |
-|------|----------|----------|------------|----------|
-| nginx:1.21.0 (6层) | 正常速度 | 瞬间完成 | 100% | 131MB |
-| 相似版本镜像 | 部分缓存 | 显著加速 | 60-80% | 50-100MB |
+### Cache Feature Effects
+| Scenario | First Download | Repeat Download | Cache Hit Rate | Data Saved |
+|----------|----------------|-----------------|----------------|------------|
+| nginx:1.21.0 (6 layers) | Normal speed | Instant completion | 100% | 131MB |
+| Similar version images | Partial cache | Significant acceleration | 60-80% | 50-100MB |
 
-## 🎯 实际使用场景
+## 🎯 Real-world Use Cases
 
-### 场景1：跨平台下载
+### Scenario 1: Cross-platform Downloads
 ```bash
-# 在x86服务器上为ARM设备准备镜像
+# Prepare images for ARM devices on x86 server
 python docker_pull.py --platform linux/arm64 nginx:latest
-# 生成 nginx_arm64.tar，可传输到ARM设备导入
+# Generates nginx_arm64.tar, can be transferred to ARM device for import
 ```
 
-### 场景2：CI/CD集成
+### Scenario 2: CI/CD Integration
 ```bash
-# GitHub Actions示例
+# GitHub Actions example
 - name: Pull Docker image
   run: |
     python docker_pull.py ${{ secrets.REGISTRY }}/${{ secrets.IMAGE }}:${{ env.TAG }} \
@@ -150,137 +159,137 @@ python docker_pull.py --platform linux/arm64 nginx:latest
       --password ${{ secrets.PASSWORD }}
 ```
 
-### 场景3：私有仓库管理
+### Scenario 3: Private Registry Management
 ```bash
-# 批量下载不同平台镜像
+# Batch download different platform images
 python docker_pull.py myregistry.com/app:v1.0 --platform linux/amd64 --username user --password pass
 python docker_pull.py myregistry.com/app:v1.0 --platform linux/arm64 --username user --password pass
 ```
 
-### 场景4：开发环境优化
+### Scenario 4: Development Environment Optimization
 ```bash
-# 首次下载基础镜像
+# First download base image
 python docker_pull.py ubuntu:20.04
 # 💾 Cache Statistics: Cache hits: 0/5 layers (0.0%)
 
-# 下载相关镜像，自动复用基础层
+# Download related image, automatically reuse base layers
 python docker_pull.py ubuntu:20.04-slim
 # 💾 Cache Statistics: Cache hits: 3/4 layers (75.0%), Data saved: 45.2 MB
 
-# 重复下载，100%缓存命中
+# Repeat download, 100% cache hit
 python docker_pull.py ubuntu:20.04
 # 💾 Cache Statistics: Cache hits: 5/5 layers (100.0%), Data saved: 72.8 MB
 ```
 
-## 🔐 认证配置
+## 🔐 Authentication Configuration
 
-### 支持的认证方式
-| 镜像源 | 认证方式 | 示例 |
-|--------|----------|------|
-| Docker Hub | 用户名密码 | `--username dockerhubuser --password dockerhubpass` |
-| Harbor | 用户名密码 | `--username harboruser --password harborpass` |
-| ECR | 用户名密码 | `--username AWS --password $(aws ecr get-login-password)` |
-| GCR | 用户名密码 | `--username oauth2accesstoken --password $(gcloud auth print-access-token)` |
+### Supported Authentication Methods
+| Image Source | Authentication Method | Example |
+|--------------|----------------------|----------|
+| Docker Hub | Username/Password | `--username dockerhubuser --password dockerhubpass` |
+| Harbor | Username/Password | `--username harboruser --password harborpass` |
+| ECR | Username/Password | `--username AWS --password $(aws ecr get-login-password)` |
+| GCR | Username/Password | `--username oauth2accesstoken --password $(gcloud auth print-access-token)` |
 
-### 安全建议
+### Security Recommendations
 ```bash
-# 推荐：使用环境变量
+# Recommended: Use environment variables
 export DOCKER_USERNAME=myuser
 export DOCKER_PASSWORD=mypass
 python docker_pull.py image --username $DOCKER_USERNAME --password $DOCKER_PASSWORD
 
-# 不推荐：命令行直接写密码
-python docker_pull.py image --username user --password pass  # 不安全
+# Not recommended: Direct password in command line
+python docker_pull.py image --username user --password pass  # Insecure
 ```
 
-## 🛠️ 故障排除
+## 🛠️ Troubleshooting
 
-### 常见问题及解决方案
+### Common Issues and Solutions
 
-#### 认证失败
+#### Authentication Failure
 ```bash
-# 错误：401 Unauthorized
-# 解决：检查用户名密码是否正确
+# Error: 401 Unauthorized
+# Solution: Check if username and password are correct
 python docker_pull.py private-image --username user --password pass
 
-# 错误：403 Forbidden  
-# 解决：检查用户权限
+# Error: 403 Forbidden
+# Solution: Check user permissions
 ```
 
-#### 平台不匹配
+#### Platform Mismatch
 ```bash
-# 错误：Platform mismatch
-# 解决：查看可用平台列表
+# Error: Platform mismatch
+# Solution: View available platform list
 python docker_pull.py image --platform invalid
-# 脚本会显示所有可用平台
+# Script will display all available platforms
 ```
 
-#### 网络问题
+#### Network Issues
 ```bash
-# 设置代理
+# Set proxy
 export HTTP_PROXY=http://proxy:8080
 export HTTPS_PROXY=http://proxy:8080
 python docker_pull.py image
 ```
 
-### 错误代码说明
-- **401**: 需要认证或认证失败
-- **403**: 权限不足
-- **404**: 镜像不存在
-- **429**: 速率限制
+### Error Code Descriptions
+- **401**: Authentication required or authentication failed
+- **403**: Insufficient permissions
+- **404**: Image does not exist
+- **429**: Rate limit exceeded
 
-## 📋 输出文件
+## 📋 Output Files
 
-下载完成后生成标准Docker tar文件：
-- **文件名**: `{registry}_{repository}_{image}_{tag}.tar`
-- **格式**: 100%兼容`docker load`命令
-- **大小**: 与官方镜像一致
-- **示例**: `docker load < library_nginx.tar`
+After download completion, generates standard Docker tar files:
+- **Filename**: `{registry}_{repository}_{image}_{tag}.tar`
+- **Format**: 100% compatible with `docker load` command
+- **Size**: Consistent with official images
+- **Example**: `docker load < library_nginx.tar`
 
-## 更新日志
+## Changelog
 
-### v3.0 (当前版本) - 智能缓存版本
-- 🆕 **智能层缓存系统**: 基于SHA256的全局层管理
-- 🆕 **增量更新**: 自动复用已下载的层，节省带宽
-- 🆕 **缓存统计**: 显示缓存命中率和节省的数据量
-- 🆕 **OCI格式支持**: 完整支持OCI镜像索引格式
-- 🆕 **阿里云ACR支持**: 支持阿里云容器镜像服务
-- ✅ 硬链接优化存储空间
-- ✅ 跨镜像层共享
+### v3.0 (Current Version) - Intelligent Caching Version
+- 🆕 **Intelligent Layer Caching System**: Global layer management based on SHA256
+- 🆕 **Incremental Updates**: Automatically reuse downloaded layers, save bandwidth
+- 🆕 **Cache Statistics**: Display cache hit rate and data saved
+- 🆕 **OCI Format Support**: Full support for OCI image index format
+- 🆕 **Alibaba Cloud ACR Support**: Support for Alibaba Cloud Container Registry
+- ✅ Hard link optimization for storage space
+- ✅ Cross-image layer sharing
 
 ### v2.0
-- ✅ 添加Docker登录认证支持
-- ✅ 支持所有主流镜像源
-- ✅ 优化内存使用90%
-- ✅ 增强错误处理
-- ✅ 改进进度显示
+- ✅ Added Docker login authentication support
+- ✅ Support for all mainstream image sources
+- ✅ 90% memory usage optimization
+- ✅ Enhanced error handling
+- ✅ Improved progress display
 
 ### v1.5
-- ✅ 添加并发下载功能
-- ✅ 支持多平台镜像
-- ✅ 性能优化
+- ✅ Added concurrent download feature
+- ✅ Multi-platform image support
+- ✅ Performance optimization
 
 ### v1.0
-- ✅ 基础镜像下载功能
+- ✅ Basic image download functionality
 
-## 许可证
-MIT License - 可自由使用、修改和分发
+## License
+MIT License - Free to use, modify and distribute
 
 ---
 
-**快速开始：**
+**Quick Start:**
 ```bash
-# 查看帮助
+# View help
 python docker_pull.py --help
 
-# 下载镜像（自动缓存）
+# Download image (auto cache)
 python docker_pull.py nginx:latest --platform linux/amd64
 # 💾 Cache Statistics: Cache hits: 0/6 layers (0.0%)
 
-# 重复下载（缓存命中）
+# Repeat download (cache hit)
 python docker_pull.py nginx:latest --platform linux/amd64
 # 💾 Cache Statistics: Cache hits: 6/6 layers (100.0%), Data saved: 131.0 MB
 
-# 查看缓存目录
+# View cache directory
 ls -la docker_images_cache/layers/
 ```
