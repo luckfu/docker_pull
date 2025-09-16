@@ -21,6 +21,7 @@ A Docker image download tool that doesn't require Docker environment, supporting
 - **Network Retry**: Intelligent retry mechanism, automatic recovery from network interruptions
 - **Progress Display**: Real-time display of download speed, progress percentage, and remaining time
 - **Authentication Support**: Docker login authentication, supports private image sources
+- **Import Feature**: Support importing layers from existing Docker tar files to cache, improving cache hit rates
 
 ### Supported Image Sources
 - ✅ **Docker Hub** (registry-1.docker.io)
@@ -52,6 +53,7 @@ python docker_pull.py [image_name] [options]
 - **Incremental Updates**: Automatically reuse cached layers on repeat downloads
 - **Cross-image Sharing**: Same layers from different images can share cache
 - **Cache Statistics**: Display cache hit rate and data saved
+- **Tar File Import**: Support importing layers from existing Docker tar files to cache, preheating cache system
 
 ## 🔧 Usage Examples
 
@@ -73,6 +75,12 @@ python docker_pull.py nginx:latest --no-cache
 
 # Custom cache directory
 python docker_pull.py nginx:latest --cache-dir /path/to/cache
+
+# Import layers from existing Docker tar file to cache
+python docker_pull.py --import-tar existing_image.tar
+
+# Use standalone import tool
+python import_tar.py existing_image.tar --cache-dir /path/to/cache
 ```
 
 #### Download Private Images (Login Authentication)
@@ -109,6 +117,7 @@ python docker_pull.py [-h] [--platform PLATFORM]
                       [--max-concurrent-downloads MAX_CONCURRENT_DOWNLOADS]
                       [--username USERNAME] [--password PASSWORD]
                       [--cache-dir CACHE_DIR] [--no-cache]
+                      [--import-tar IMPORT_TAR]
                       image
 
 Arguments:
@@ -119,6 +128,7 @@ Arguments:
 - --password: Password (for private image source authentication)
 - --cache-dir: Layer cache directory (default: ./docker_images_cache)
 - --no-cache: Disable layer caching feature
+- --import-tar: Import layers from existing Docker tar file to cache
 ```
 
 ## 📊 Performance Comparison
@@ -175,6 +185,18 @@ python docker_pull.py ubuntu:20.04-slim
 # Repeat download, 100% cache hit
 python docker_pull.py ubuntu:20.04
 # 💾 Cache Statistics: Cache hits: 5/5 layers (100.0%), Data saved: 72.8 MB
+```
+
+### Scenario 5: Cache Preheating
+```bash
+# Import layers from existing Docker tar file to cache
+python docker_pull.py --import-tar nginx_latest.tar
+# 🔄 Starting import of Docker tar file to cache: nginx_latest.tar
+# ✅ Successfully imported: 6 layers, 💾 Import data: 131.0 MB
+
+# Or use standalone import tool
+python import_tar.py existing_image.tar
+# Support batch import of multiple tar files to preheat cache
 ```
 
 ## 🔐 Authentication Configuration
@@ -285,6 +307,10 @@ python docker_pull.py nginx:latest --platform linux/amd64
 # Repeat download (cache hit)
 python docker_pull.py nginx:latest --platform linux/amd64
 # 💾 Cache Statistics: Cache hits: 6/6 layers (100.0%), Data saved: 131.0 MB
+
+# Import existing tar file to cache
+python docker_pull.py --import-tar existing_image.tar
+# 🔄 Starting import of Docker tar file to cache...
 
 # View cache directory
 ls -la docker_images_cache/layers/

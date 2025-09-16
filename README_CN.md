@@ -21,6 +21,7 @@
 - **网络重试**: 智能重试机制，网络中断自动恢复
 - **进度显示**: 实时显示下载速度、进度百分比和剩余时间
 - **认证支持**: Docker登录认证，支持私有镜像源
+- **导入功能**: 支持从现有Docker tar文件导入层到缓存，提升缓存命中率
 
 ### 支持的镜像源
 - ✅ **Docker Hub** (registry-1.docker.io)
@@ -52,6 +53,7 @@ python docker_pull.py [镜像名] [选项]
 - **增量更新**: 重复下载时自动复用已缓存的层
 - **跨镜像共享**: 不同镜像的相同层可以共享缓存
 - **缓存统计**: 显示缓存命中率和节省的数据量
+- **tar文件导入**: 支持从现有Docker tar文件导入层到缓存，预热缓存系统
 
 ## 🔧 使用示例
 
@@ -73,6 +75,12 @@ python docker_pull.py nginx:latest --no-cache
 
 # 自定义缓存目录
 python docker_pull.py nginx:latest --cache-dir /path/to/cache
+
+# 从现有Docker tar文件导入层到缓存
+python docker_pull.py --import-tar existing_image.tar
+
+# 使用独立导入工具
+python import_tar.py existing_image.tar --cache-dir /path/to/cache
 ```
 
 #### 下载私有镜像（登录认证）
@@ -109,6 +117,7 @@ python docker_pull.py [-h] [--platform PLATFORM]
                       [--max-concurrent-downloads MAX_CONCURRENT_DOWNLOADS]
                       [--username USERNAME] [--password PASSWORD]
                       [--cache-dir CACHE_DIR] [--no-cache]
+                      [--import-tar IMPORT_TAR]
                       image
 
 参数说明：
@@ -119,6 +128,7 @@ python docker_pull.py [-h] [--platform PLATFORM]
 - --password: 密码（私有镜像源认证）
 - --cache-dir: 层缓存目录 (默认: ./docker_images_cache)
 - --no-cache: 禁用层缓存功能
+- --import-tar: 从现有Docker tar文件导入层到缓存
 ```
 
 ## 📊 性能对比
@@ -175,6 +185,18 @@ python docker_pull.py ubuntu:20.04-slim
 # 重复下载，100%缓存命中
 python docker_pull.py ubuntu:20.04
 # 💾 Cache Statistics: Cache hits: 5/5 layers (100.0%), Data saved: 72.8 MB
+```
+
+### 场景5：缓存预热
+```bash
+# 从现有Docker tar文件导入层到缓存
+python docker_pull.py --import-tar nginx_latest.tar
+# 🔄 开始导入Docker tar文件到缓存: nginx_latest.tar
+# ✅ 成功导入: 6 个层，💾 导入数据量: 131.0 MB
+
+# 或使用独立导入工具
+python import_tar.py existing_image.tar
+# 支持批量导入多个tar文件预热缓存
 ```
 
 ## 🔐 认证配置
@@ -285,6 +307,10 @@ python docker_pull.py nginx:latest --platform linux/amd64
 # 重复下载（缓存命中）
 python docker_pull.py nginx:latest --platform linux/amd64
 # 💾 Cache Statistics: Cache hits: 6/6 layers (100.0%), Data saved: 131.0 MB
+
+# 导入现有tar文件到缓存
+python docker_pull.py --import-tar existing_image.tar
+# 🔄 开始导入Docker tar文件到缓存...
 
 # 查看缓存目录
 ls -la docker_images_cache/layers/
