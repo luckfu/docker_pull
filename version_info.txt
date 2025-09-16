@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 1, 0),
-    prodvers=(1, 1, 1, 0),
+    filevers=(1, 24, 0, 0),
+    prodvers=(1, 24, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,9 +16,9 @@ VSVersionInfo(
           u'040904B0',
           [StringStruct(u'CompanyName', u'luckfu'),
            StringStruct(u'FileDescription', u'高性能Docker镜像下载工具，支持多平台、并发下载、智能缓存'),
-           StringStruct(u'FileVersion', u'1.1.1.0'),
+           StringStruct(u'FileVersion', u'1.24.0'),
            StringStruct(u'ProductName', u'Docker Pull'),
-           StringStruct(u'ProductVersion', u'1.1.1'),
+           StringStruct(u'ProductVersion', u'1.24'),
            StringStruct(u'LegalCopyright', u'Copyright © 2024 luckfu. 开源项目: https://github.com/luckfu/docker_pull'),
            StringStruct(u'Comments', u'不需要安装Docker的镜像下载工具 - https://github.com/luckfu/docker_pull 开源项目'),
            StringStruct(u'InternalName', u'docker_pull'),

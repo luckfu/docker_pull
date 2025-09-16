@@ -46,7 +46,7 @@ if hasattr(signal, 'SIGTERM'):
     signal.signal(signal.SIGTERM, signal_handler)
 
 # 版本和版权信息
-__version__ = "1.1.1"
+__version__ = "1.24"
 __author__ = "luckfu"
 __copyright__ = "Copyright © 2024 luckfu"
 __license__ = "MIT"
