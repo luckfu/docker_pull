@@ -527,149 +527,149 @@ if args.import_tar:
 else:
     # 只有在非导入模式下才定义和执行镜像下载相关的函数和逻辑
     def progress_bar(ublob, downloaded, total, start_time):
-    """Enhanced progress bar with speed and ETA"""
-    if total and total > 0:
-        percentage = (downloaded / total) * 100
-        bar_length = 30
-        filled_length = int(bar_length * downloaded // total)
-        bar = '█' * filled_length + '-' * (bar_length - filled_length)
-        
-        elapsed = time.time() - start_time
-        speed = downloaded / elapsed if elapsed > 0 else 0
-        
-        if total > downloaded:
-            eta = (total - downloaded) / speed if speed > 0 else 0
-            eta_str = format_time(eta)
+        """Enhanced progress bar with speed and ETA"""
+        if total and total > 0:
+            percentage = (downloaded / total) * 100
+            bar_length = 30
+            filled_length = int(bar_length * downloaded // total)
+            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+            
+            elapsed = time.time() - start_time
+            speed = downloaded / elapsed if elapsed > 0 else 0
+            
+            if total > downloaded:
+                eta = (total - downloaded) / speed if speed > 0 else 0
+                eta_str = format_time(eta)
+            else:
+                eta_str = "0s"
+            
+            speed_str = format_speed(speed)
+            
+            sys.stdout.write(f'\r{ublob[7:19]}: |{bar}| {percentage:.1f}% ({speed_str}/s, ETA: {eta_str})')
+            sys.stdout.flush()
         else:
-            eta_str = "0s"
+            # Unknown total size
+            speed = format_speed(downloaded / (time.time() - start_time))
+            sys.stdout.write(f'\r{ublob[7:19]}: Downloaded {format_speed(downloaded)} ({speed}/s)')
+            sys.stdout.flush()
+
+    @retry(max_attempts=3, delay=1.0, backoff=2.0)
+    def download_layer(layer, imgdir, parentid):
+        """Download a single layer in a separate thread with streaming and progress"""
+        # 检查是否收到中断信号
+        if shutdown_event.is_set():
+            raise KeyboardInterrupt("Download interrupted by user")
         
-        speed_str = format_speed(speed)
-        
-        sys.stdout.write(f'\r{ublob[7:19]}: |{bar}| {percentage:.1f}% ({speed_str}/s, ETA: {eta_str})')
-        sys.stdout.flush()
-    else:
-        # Unknown total size
-        speed = format_speed(downloaded / (time.time() - start_time))
-        sys.stdout.write(f'\r{ublob[7:19]}: Downloaded {format_speed(downloaded)} ({speed}/s)')
-        sys.stdout.flush()
+        ublob = layer['digest']
+        fake_layerid = hashlib.sha256((parentid+'\n'+ublob+'\n').encode('utf-8')).hexdigest()
+        layerdir = imgdir + '/' + fake_layerid
+        os.makedirs(layerdir, exist_ok=True)
 
-@retry(max_attempts=3, delay=1.0, backoff=2.0)
-def download_layer(layer, imgdir, parentid):
-    """Download a single layer in a separate thread with streaming and progress"""
-    # 检查是否收到中断信号
-    if shutdown_event.is_set():
-        raise KeyboardInterrupt("Download interrupted by user")
-    
-    ublob = layer['digest']
-    fake_layerid = hashlib.sha256((parentid+'\n'+ublob+'\n').encode('utf-8')).hexdigest()
-    layerdir = imgdir + '/' + fake_layerid
-    os.makedirs(layerdir, exist_ok=True)
+        # Create VERSION file
+        with open(layerdir + '/VERSION', 'w') as f:
+            f.write('1.0')
 
-    # Create VERSION file
-    with open(layerdir + '/VERSION', 'w') as f:
-        f.write('1.0')
-
-    # Check cache first
-    cache_path = check_layer_cache(ublob)
-    if cache_path:
-        with progress_lock:
-            print(f'{ublob[7:19]}: Using cached layer')
-        if use_cached_layer(cache_path, layerdir, ublob):
-            return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
-        else:
+        # Check cache first
+        cache_path = check_layer_cache(ublob)
+        if cache_path:
             with progress_lock:
-                print(f'{ublob[7:19]}: Cache failed, downloading...')
-    
-    # Update cache miss stats
-    with progress_lock:
-        cache_stats['misses'] += 1
-
-    start_time = time.time()
-
-    auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
-
-    # Try primary URL first, then fallback URLs
-    urls = [f'https://{registry}/v2/{repository}/blobs/{ublob}']
-    if 'urls' in layer and layer['urls']:
-        urls.extend(layer['urls'])
-
-    bresp = None
-    for url in urls:
-        try:
-            # 检查中断信号
-            if shutdown_event.is_set():
-                raise KeyboardInterrupt("Download interrupted by user")
-                
-            bresp = session.get(url, headers=auth_head, stream=True, verify=False, timeout=30)
-            if bresp.status_code == 200:
-                break
-        except KeyboardInterrupt:
-            raise
-        except requests.RequestException:
-            continue
-    else:
+                print(f'{ublob[7:19]}: Using cached layer')
+            if use_cached_layer(cache_path, layerdir, ublob):
+                return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
+            else:
+                with progress_lock:
+                    print(f'{ublob[7:19]}: Cache failed, downloading...')
+        
+        # Update cache miss stats
         with progress_lock:
-            print(f'ERROR: Cannot download layer {ublob[7:19]} from any source')
-        return None
+            cache_stats['misses'] += 1
 
-    # Stream download with progress
-    content_length = int(bresp.headers.get('Content-Length', 0)) if bresp.headers.get('Content-Length') else None
-    downloaded = 0
-    last_update = 0
+        start_time = time.time()
 
-    try:
-        # Stream directly to file without loading entire content in memory
-        with open(layerdir + '/layer_gzip.tar', 'wb') as file:
-            for chunk in bresp.iter_content(chunk_size=1024*1024):  # 1MB chunks
+        auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
+
+        # Try primary URL first, then fallback URLs
+        urls = [f'https://{registry}/v2/{repository}/blobs/{ublob}']
+        if 'urls' in layer and layer['urls']:
+            urls.extend(layer['urls'])
+
+        bresp = None
+        for url in urls:
+            try:
                 # 检查中断信号
                 if shutdown_event.is_set():
-                    bresp.close()
                     raise KeyboardInterrupt("Download interrupted by user")
                     
-                if chunk:
-                    file.write(chunk)
-                    downloaded += len(chunk)
-
-                    # Update progress every 100ms
-                    current_time = time.time()
-                    if current_time - last_update > 0.1:
-                        with progress_lock:
-                            progress_bar(ublob, downloaded, content_length, start_time)
-                        last_update = current_time
-
-        with progress_lock:
-            print(f'{ublob[7:19]}: Download complete ({format_speed(downloaded)})')
-            print(f'{ublob[7:19]}: Extracting...')
-
-        # Stream decompress to avoid memory issues
-        with open(layerdir + '/layer.tar', 'wb') as out_file:
-            with gzip.open(layerdir + '/layer_gzip.tar', 'rb') as gz_file:
-                shutil.copyfileobj(gz_file, out_file)  # type: ignore
-
-        os.remove(layerdir + '/layer_gzip.tar')
-        
-        # Save to cache after successful download and extraction
-        layer_tar_path = layerdir + '/layer.tar'
-        if save_layer_to_cache(ublob, layer_tar_path):
+                bresp = session.get(url, headers=auth_head, stream=True, verify=False, timeout=30)
+                if bresp.status_code == 200:
+                    break
+            except KeyboardInterrupt:
+                raise
+            except requests.RequestException:
+                continue
+        else:
             with progress_lock:
-                print(f'{ublob[7:19]}: Cached for future use')
-        
-        return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
-        
-    except KeyboardInterrupt:
-        # 清理部分下载的文件
-        if os.path.exists(layerdir + '/layer_gzip.tar'):
+                print(f'ERROR: Cannot download layer {ublob[7:19]} from any source')
+            return None
+
+        # Stream download with progress
+        content_length = int(bresp.headers.get('Content-Length', 0)) if bresp.headers.get('Content-Length') else None
+        downloaded = 0
+        last_update = 0
+
+        try:
+            # Stream directly to file without loading entire content in memory
+            with open(layerdir + '/layer_gzip.tar', 'wb') as file:
+                for chunk in bresp.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                    # 检查中断信号
+                    if shutdown_event.is_set():
+                        bresp.close()
+                        raise KeyboardInterrupt("Download interrupted by user")
+                        
+                    if chunk:
+                        file.write(chunk)
+                        downloaded += len(chunk)
+
+                        # Update progress every 100ms
+                        current_time = time.time()
+                        if current_time - last_update > 0.1:
+                            with progress_lock:
+                                progress_bar(ublob, downloaded, content_length, start_time)
+                            last_update = current_time
+
+            with progress_lock:
+                print(f'{ublob[7:19]}: Download complete ({format_speed(downloaded)})')
+                print(f'{ublob[7:19]}: Extracting...')
+
+            # Stream decompress to avoid memory issues
+            with open(layerdir + '/layer.tar', 'wb') as out_file:
+                with gzip.open(layerdir + '/layer_gzip.tar', 'rb') as gz_file:
+                    shutil.copyfileobj(gz_file, out_file)  # type: ignore
+
             os.remove(layerdir + '/layer_gzip.tar')
-        if os.path.exists(layerdir + '/layer.tar'):
-            os.remove(layerdir + '/layer.tar')
-        raise
-    except Exception as e:
-        # 清理部分下载的文件
-        if os.path.exists(layerdir + '/layer_gzip.tar'):
-            os.remove(layerdir + '/layer_gzip.tar')
-        if os.path.exists(layerdir + '/layer.tar'):
-            os.remove(layerdir + '/layer.tar')
-        raise RetryError(f'Error downloading layer {ublob[7:19]}: {str(e)}')
+            
+            # Save to cache after successful download and extraction
+            layer_tar_path = layerdir + '/layer.tar'
+            if save_layer_to_cache(ublob, layer_tar_path):
+                with progress_lock:
+                    print(f'{ublob[7:19]}: Cached for future use')
+            
+            return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
+            
+        except KeyboardInterrupt:
+            # 清理部分下载的文件
+            if os.path.exists(layerdir + '/layer_gzip.tar'):
+                os.remove(layerdir + '/layer_gzip.tar')
+            if os.path.exists(layerdir + '/layer.tar'):
+                os.remove(layerdir + '/layer.tar')
+            raise
+        except Exception as e:
+            # 清理部分下载的文件
+            if os.path.exists(layerdir + '/layer_gzip.tar'):
+                os.remove(layerdir + '/layer_gzip.tar')
+            if os.path.exists(layerdir + '/layer.tar'):
+                os.remove(layerdir + '/layer.tar')
+            raise RetryError(f'Error downloading layer {ublob[7:19]}: {str(e)}')
 
     # Main execution continues...
     # Get Docker authentication
