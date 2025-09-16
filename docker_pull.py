@@ -83,6 +83,7 @@ parser.add_argument('--username', help='Username for registry authentication (su
 parser.add_argument('--password', help='Password for registry authentication')
 parser.add_argument('--cache-dir', help='Layer cache directory (default: ./docker_images_cache)', default=None)
 parser.add_argument('--no-cache', action='store_true', help='Disable layer caching')
+parser.add_argument('--import-tar', help='Import layers from existing Docker tar file to cache')
 parser.add_argument('--version', action='store_true', help='Show version information and exit')
 args = parser.parse_args()
 
@@ -91,61 +92,84 @@ if args.version:
     show_version()
     sys.exit(0)
 
-# 检查是否提供了镜像参数
-if not args.image:
+# 检查是否提供了镜像参数或导入tar文件
+if not args.image and not args.import_tar:
     show_banner()
     parser.print_help()
     print(f"\n💡 示例用法:")
     print(f"   python docker_pull.py nginx:latest")
     print(f"   python docker_pull.py --platform linux/arm64 ubuntu:20.04")
+    print(f"   python docker_pull.py --import-tar xxx.tar")
     print(f"   python docker_pull.py --version")
     sys.exit(1)
 
-# 显示启动横幅
-show_banner()
-
-image_arg = args.image
-target_platform = args.platform
-max_concurrent_downloads = args.max_concurrent_downloads
-
-# Layer cache configuration
-use_cache = not args.no_cache
-if args.cache_dir:
-    cache_dir = Path(args.cache_dir).expanduser().resolve()
+# 处理导入tar文件功能（提前处理以避免执行镜像下载逻辑）
+if args.import_tar:
+    # 设置缓存相关变量
+    if args.cache_dir:
+        cache_dir = Path(args.cache_dir).expanduser().resolve()
+    else:
+        cache_dir = Path.cwd() / 'docker_images_cache'
+    
+    layers_cache_dir = cache_dir / 'layers'
+    use_cache = True  # 导入功能需要启用缓存
+    
+    print(f"\n🔄 Docker tar文件导入模式")
+    # 跳转到函数定义后的导入处理
+    import_tar_file = args.import_tar
 else:
-    cache_dir = Path.cwd() / 'docker_images_cache'
+    import_tar_file = None
 
-layers_cache_dir = cache_dir / 'layers'
-manifests_cache_dir = cache_dir / 'manifests'
+# 显示启动横幅（仅在非导入模式下）
+if not args.import_tar:
+    show_banner()
 
-# Initialize cache directories
-if use_cache:
-    layers_cache_dir.mkdir(parents=True, exist_ok=True)
-    manifests_cache_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Using layer cache: {cache_dir}")
-else:
-    print("Layer caching disabled")
+# 导入tar文件功能将在缓存函数定义后处理
 
-# Thread-safe progress tracking
-progress_lock = threading.Lock()
-download_progress = {}
-cache_stats = {'hits': 0, 'misses': 0, 'bytes_saved': 0}
+# 只有在非导入模式下才执行镜像下载逻辑
+if not args.import_tar:
+    image_arg = args.image
+    target_platform = args.platform
+    max_concurrent_downloads = args.max_concurrent_downloads
 
-# Global session for connection pooling
-session = requests.Session()
-session.headers.update({'User-Agent': 'Docker-Pull-Script/1.0'})
+    # Layer cache configuration
+    use_cache = not args.no_cache
+    if args.cache_dir:
+        cache_dir = Path(args.cache_dir).expanduser().resolve()
+    else:
+        cache_dir = Path.cwd() / 'docker_images_cache'
 
-# Authentication support
-username = args.username
-password = args.password
+    layers_cache_dir = cache_dir / 'layers'
+    manifests_cache_dir = cache_dir / 'manifests'
 
-# Display authentication info
-if username and password:
-    print(f"Using authentication for user: {username}")
-elif username or password:
-    print("Warning: Both username and password are required for authentication")
-else:
-    print("Using anonymous access (no credentials provided)")
+    # Initialize cache directories
+    if use_cache:
+        layers_cache_dir.mkdir(parents=True, exist_ok=True)
+        manifests_cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Using layer cache: {cache_dir}")
+    else:
+        print("Layer caching disabled")
+
+    # Thread-safe progress tracking
+    progress_lock = threading.Lock()
+    download_progress = {}
+    cache_stats = {'hits': 0, 'misses': 0, 'bytes_saved': 0}
+
+    # Global session for connection pooling
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Docker-Pull-Script/1.0'})
+
+    # Authentication support
+    username = args.username
+    password = args.password
+
+    # Display authentication info
+    if username and password:
+        print(f"Using authentication for user: {username}")
+    elif username or password:
+        print("Warning: Both username and password are required for authentication")
+    else:
+        print("Using anonymous access (no credentials provided)")
 
 # Retry decorator
 class RetryError(Exception):
@@ -170,138 +194,138 @@ def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
         return wrapper
     return decorator
 
-# Look for the Docker image to download
-repo = 'library'
-tag = 'latest'
-imgparts = image_arg.split('/')
-try:
-    img,tag = imgparts[-1].split('@')
-except ValueError:
+    # Look for the Docker image to download
+    repo = 'library'
+    tag = 'latest'
+    imgparts = image_arg.split('/')
     try:
-        img,tag = imgparts[-1].split(':')
+        img,tag = imgparts[-1].split('@')
     except ValueError:
-        img = imgparts[-1]
-# Docker client doesn't seem to consider the first element as a potential registry unless there is a '.' or ':'
-if len(imgparts) > 1 and ('.' in imgparts[0] or ':' in imgparts[0]):
-    registry = imgparts[0]
-    repo = '/'.join(imgparts[1:-1])
-else:
-    registry = 'registry-1.docker.io'
-    if len(imgparts[:-1]) != 0:
-        repo = '/'.join(imgparts[:-1])
-    else:
-        repo = 'library'
-repository = '{}/{}'.format(repo, img)
-
-# Get Docker authentication endpoint when it is required
-auth_url='https://auth.docker.io/token'
-reg_service='registry.docker.io'
-
-# Handle authentication for different registry types
-registry_auth_endpoints = {
-    'registry-1.docker.io': {
-        'auth_url': 'https://auth.docker.io/token',
-        'service': 'registry.docker.io'
-    },
-    'gcr.io': {
-        'auth_url': 'https://gcr.io/v2/token',
-        'service': 'gcr.io'
-    },
-    'us.gcr.io': {
-        'auth_url': 'https://us.gcr.io/v2/token',
-        'service': 'us.gcr.io'
-    },
-    'eu.gcr.io': {
-        'auth_url': 'https://eu.gcr.io/v2/token',
-        'service': 'eu.gcr.io'
-    },
-    'asia.gcr.io': {
-        'auth_url': 'https://asia.gcr.io/v2/token',
-        'service': 'asia.gcr.io'
-    },
-    'quay.io': {
-        'auth_url': 'https://quay.io/v2/auth',
-        'service': 'quay.io'
-    },
-    'registry.cn-shanghai.aliyuncs.com': {
-        'auth_url': 'https://dockerauth.cn-hangzhou.aliyuncs.com/auth',
-        'service': 'registry.aliyuncs.com:cn-shanghai:26842'
-    },
-    'registry.cn-beijing.aliyuncs.com': {
-        'auth_url': 'https://registry.cn-beijing.aliyuncs.com/v2/token',
-        'service': 'registry.cn-beijing.aliyuncs.com'
-    },
-    'registry.cn-hangzhou.aliyuncs.com': {
-        'auth_url': 'https://registry.cn-hangzhou.aliyuncs.com/v2/token',
-        'service': 'registry.cn-hangzhou.aliyuncs.com'
-    }
-}
-
-# Check if we have a known registry
-if registry in registry_auth_endpoints:
-    auth_url = registry_auth_endpoints[registry]['auth_url']
-    reg_service = registry_auth_endpoints[registry]['service']
-
-# Probe for authentication endpoint
-resp = requests.get(f'https://{registry}/v2/', verify=False)
-if resp.status_code == 401:
-    www_auth = resp.headers.get('WWW-Authenticate', '')
-    if 'Bearer' in www_auth:
-        # Parse WWW-Authenticate header for token endpoint
         try:
-            # Handle different formats of WWW-Authenticate header
-            if 'realm=' in www_auth:
-                realm_start = www_auth.find('realm="') + 7
-                realm_end = www_auth.find('"', realm_start)
-                auth_url = www_auth[realm_start:realm_end]
-                
-            if 'service=' in www_auth:
-                service_start = www_auth.find('service="') + 9
-                service_end = www_auth.find('"', service_start)
-                if service_start > 8:  # Check if service= was found
-                    reg_service = www_auth[service_start:service_end]
-        except (IndexError, ValueError):
-            # Fallback to registry-specific defaults
-            pass
-    elif 'Basic' in www_auth:
-        # Registry uses basic authentication
-        print(f"Registry {registry} uses basic authentication")
-
-
-def get_auth_head(type_var):
-    header = {'Accept': type_var}
-    
-    # If username and password are provided, use basic auth
-    if username and password:
-        # Use basic authentication for private registries
-        credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
-        header['Authorization'] = f'Basic {credentials}'
-        return header
-    
-    # For public registries or when no credentials provided, use token auth
-    try:
-        token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
-        
-        # Add credentials to token request if available
-        auth = None
-        if username and password:
-            auth = (username, password)
-            
-        resp = requests.get(token_url, auth=auth, verify=False)
-        
-        if resp.status_code == 200:
-            token_data = resp.json()
-            token = token_data.get('token') or token_data.get('access_token')
-            if token:
-                header['Authorization'] = f'Bearer {token}'
+            img,tag = imgparts[-1].split(':')
+        except ValueError:
+            img = imgparts[-1]
+    # Docker client doesn't seem to consider the first element as a potential registry unless there is a '.' or ':'
+    if len(imgparts) > 1 and ('.' in imgparts[0] or ':' in imgparts[0]):
+        registry = imgparts[0]
+        repo = '/'.join(imgparts[1:-1])
+    else:
+        registry = 'registry-1.docker.io'
+        if len(imgparts[:-1]) != 0:
+            repo = '/'.join(imgparts[:-1])
         else:
-            # If token auth fails, try anonymous access
-            print(f"Warning: Token authentication failed with status {resp.status_code}")
+            repo = 'library'
+    repository = '{}/{}'.format(repo, img)
+
+    # Get Docker authentication endpoint when it is required
+    auth_url='https://auth.docker.io/token'
+    reg_service='registry.docker.io'
+
+    # Handle authentication for different registry types
+    registry_auth_endpoints = {
+        'registry-1.docker.io': {
+            'auth_url': 'https://auth.docker.io/token',
+            'service': 'registry.docker.io'
+        },
+        'gcr.io': {
+            'auth_url': 'https://gcr.io/v2/token',
+            'service': 'gcr.io'
+        },
+        'us.gcr.io': {
+            'auth_url': 'https://us.gcr.io/v2/token',
+            'service': 'us.gcr.io'
+        },
+        'eu.gcr.io': {
+            'auth_url': 'https://eu.gcr.io/v2/token',
+            'service': 'eu.gcr.io'
+        },
+        'asia.gcr.io': {
+            'auth_url': 'https://asia.gcr.io/v2/token',
+            'service': 'asia.gcr.io'
+        },
+        'quay.io': {
+            'auth_url': 'https://quay.io/v2/auth',
+            'service': 'quay.io'
+        },
+        'registry.cn-shanghai.aliyuncs.com': {
+            'auth_url': 'https://dockerauth.cn-hangzhou.aliyuncs.com/auth',
+            'service': 'registry.aliyuncs.com:cn-shanghai:26842'
+        },
+        'registry.cn-beijing.aliyuncs.com': {
+            'auth_url': 'https://registry.cn-beijing.aliyuncs.com/v2/token',
+            'service': 'registry.cn-beijing.aliyuncs.com'
+        },
+        'registry.cn-hangzhou.aliyuncs.com': {
+            'auth_url': 'https://registry.cn-hangzhou.aliyuncs.com/v2/token',
+            'service': 'registry.cn-hangzhou.aliyuncs.com'
+        }
+    }
+
+    # Check if we have a known registry
+    if registry in registry_auth_endpoints:
+        auth_url = registry_auth_endpoints[registry]['auth_url']
+        reg_service = registry_auth_endpoints[registry]['service']
+
+    # Probe for authentication endpoint
+    resp = requests.get(f'https://{registry}/v2/', verify=False)
+    if resp.status_code == 401:
+        www_auth = resp.headers.get('WWW-Authenticate', '')
+        if 'Bearer' in www_auth:
+            # Parse WWW-Authenticate header for token endpoint
+            try:
+                # Handle different formats of WWW-Authenticate header
+                if 'realm=' in www_auth:
+                    realm_start = www_auth.find('realm="') + 7
+                    realm_end = www_auth.find('"', realm_start)
+                    auth_url = www_auth[realm_start:realm_end]
+                    
+                if 'service=' in www_auth:
+                    service_start = www_auth.find('service="') + 9
+                    service_end = www_auth.find('"', service_start)
+                    if service_start > 8:  # Check if service= was found
+                        reg_service = www_auth[service_start:service_end]
+            except (IndexError, ValueError):
+                # Fallback to registry-specific defaults
+                pass
+        elif 'Basic' in www_auth:
+            # Registry uses basic authentication
+            print(f"Registry {registry} uses basic authentication")
+
+
+    def get_auth_head(type_var):
+        header = {'Accept': type_var}
+        
+        # If username and password are provided, use basic auth
+        if username and password:
+            # Use basic authentication for private registries
+            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+            header['Authorization'] = f'Basic {credentials}'
+            return header
+        
+        # For public registries or when no credentials provided, use token auth
+        try:
+            token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
             
-    except Exception as e:
-        print(f"Warning: Could not obtain authentication token: {e}")
-    
-    return header
+            # Add credentials to token request if available
+            auth = None
+            if username and password:
+                auth = (username, password)
+                
+            resp = requests.get(token_url, auth=auth, verify=False)
+            
+            if resp.status_code == 200:
+                token_data = resp.json()
+                token = token_data.get('token') or token_data.get('access_token')
+                if token:
+                    header['Authorization'] = f'Bearer {token}'
+            else:
+                # If token auth fails, try anonymous access
+                print(f"Warning: Token authentication failed with status {resp.status_code}")
+                
+        except Exception as e:
+            print(f"Warning: Could not obtain authentication token: {e}")
+        
+        return header
 
 def format_speed(bytes_downloaded):
     """Format download speed in human-readable format"""
@@ -392,7 +416,117 @@ def use_cached_layer(cache_path: Path, target_dir: str, layer_digest: str) -> bo
         print(f"Warning: Failed to use cached layer {layer_digest[7:19]}: {e}")
         return False
 
-def progress_bar(ublob, downloaded, total, start_time):
+def calculate_layer_digest(layer_tar_path: str) -> str:
+    """Calculate SHA256 digest of a layer tar file"""
+    sha256_hash = hashlib.sha256()
+    with open(layer_tar_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256_hash.update(chunk)
+    return f"sha256:{sha256_hash.hexdigest()}"
+
+def import_docker_tar_to_cache(tar_file_path: str):
+    """Import layers from a Docker tar file to cache"""
+    print(f"🔄 开始导入Docker tar文件到缓存: {tar_file_path}")
+    
+    if not os.path.exists(tar_file_path):
+        print(f"❌ 错误: 文件不存在 {tar_file_path}")
+        return
+    
+    # 确保缓存目录存在
+    layers_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    imported_count = 0
+    skipped_count = 0
+    total_size = 0
+    temp_dir = Path('temp_docker_import')
+    
+    try:
+        with tarfile.open(tar_file_path, 'r') as tar:
+            # 提取到临时目录
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+            temp_dir.mkdir()
+            
+            print("📦 解压Docker tar文件...")
+            tar.extractall(temp_dir)
+            
+            # 查找manifest.json文件
+            manifest_files = list(temp_dir.glob('**/manifest.json'))
+            if not manifest_files:
+                print("❌ 错误: 在Docker tar文件中未找到manifest.json")
+                return
+            
+            manifest_file = manifest_files[0]
+            with open(manifest_file, 'r') as f:
+                manifest_data = json.load(f)
+            
+            print(f"📋 找到 {len(manifest_data)} 个镜像清单")
+            
+            # 处理每个镜像的layers
+            for image_manifest in manifest_data:
+                if 'Layers' not in image_manifest:
+                    continue
+                    
+                repo_tags = image_manifest.get('RepoTags', ['unknown:latest'])
+                print(f"\n🏷️  处理镜像: {', '.join(repo_tags)}")
+                
+                layers = image_manifest['Layers']
+                print(f"📦 发现 {len(layers)} 个层")
+                
+                for layer_path in layers:
+                    full_layer_path = temp_dir / layer_path
+                    if not full_layer_path.exists():
+                        print(f"⚠️  警告: 层文件不存在 {layer_path}")
+                        continue
+                    
+                    # 计算层的digest
+                    print(f"🔍 计算层digest: {layer_path}")
+                    layer_digest = calculate_layer_digest(str(full_layer_path))
+                    
+                    # 检查是否已经在缓存中
+                    if check_layer_cache(layer_digest):
+                        print(f"⏭️  跳过已缓存的层: {layer_digest[7:19]}")
+                        skipped_count += 1
+                        continue
+                    
+                    # 导入到缓存
+                    layer_size = full_layer_path.stat().st_size
+                    if save_layer_to_cache(layer_digest, str(full_layer_path)):
+                        print(f"✅ 成功导入层: {layer_digest[7:19]} ({format_speed(layer_size)})")
+                        imported_count += 1
+                        total_size += layer_size
+                    else:
+                        print(f"❌ 导入层失败: {layer_digest[7:19]}")
+            
+            # 清理临时目录
+            shutil.rmtree(temp_dir)
+            
+    except Exception as e:
+        print(f"❌ 导入过程中发生错误: {e}")
+        # 清理临时目录
+        if 'temp_dir' in locals() and temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        return
+    
+    # 显示导入统计
+    print(f"\n📊 导入完成统计:")
+    print(f"   ✅ 成功导入: {imported_count} 个层")
+    print(f"   ⏭️  跳过已存在: {skipped_count} 个层")
+    if total_size > 0:
+        if total_size >= 1024 * 1024 * 1024:
+            print(f"   💾 导入数据量: {total_size/(1024*1024*1024):.1f} GB")
+        else:
+            print(f"   💾 导入数据量: {total_size/(1024*1024):.1f} MB")
+    print(f"   📁 缓存位置: {layers_cache_dir}")
+    print(f"\n🎉 Docker tar文件导入完成！")
+
+# 处理导入tar文件功能（在函数定义后立即处理）
+if args.import_tar:
+    import_docker_tar_to_cache(args.import_tar)
+    sys.exit(0)
+else:
+    # 只有在非导入模式下才定义和执行镜像下载相关的函数和逻辑
+    def progress_bar(ublob, downloaded, total, start_time):
     """Enhanced progress bar with speed and ETA"""
     if total and total > 0:
         percentage = (downloaded / total) * 100
@@ -537,242 +671,242 @@ def download_layer(layer, imgdir, parentid):
             os.remove(layerdir + '/layer.tar')
         raise RetryError(f'Error downloading layer {ublob[7:19]}: {str(e)}')
 
-# Main execution continues...
-# Get Docker authentication
-# Support multiple manifest formats including OCI index
-accept_types = [
-    'application/vnd.oci.image.index.v1+json',
-    'application/vnd.oci.image.manifest.v1+json',
-    'application/vnd.docker.distribution.manifest.list.v2+json',
-    'application/vnd.docker.distribution.manifest.v2+json',
-    'application/vnd.docker.distribution.manifest.v1+json'
-]
-auth_head = get_auth_head(', '.join(accept_types))
+    # Main execution continues...
+    # Get Docker authentication
+    # Support multiple manifest formats including OCI index
+    accept_types = [
+        'application/vnd.oci.image.index.v1+json',
+        'application/vnd.oci.image.manifest.v1+json',
+        'application/vnd.docker.distribution.manifest.list.v2+json',
+        'application/vnd.docker.distribution.manifest.v2+json',
+        'application/vnd.docker.distribution.manifest.v1+json'
+    ]
+    auth_head = get_auth_head(', '.join(accept_types))
 
-# Get manifest
-try:
-    resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, tag), headers=auth_head, verify=False, timeout=30)
+    # Get manifest
+    try:
+        resp = requests.get('https://{}/v2/{}/manifests/{}'.format(registry, repository, tag), headers=auth_head, verify=False, timeout=30)
+        if resp.status_code != 200:
+            print('Cannot fetch manifest for {} [HTTP {}]'.format(repository, resp.status_code))
+            if resp.status_code == 401:
+                print('Authentication failed. Please check your credentials.')
+                if not username or not password:
+                    print('Private registry requires authentication. Use --username and --password arguments.')
+            elif resp.status_code == 403:
+                print('Access forbidden. You may not have permission to access this image.')
+            print(resp.content)
+            exit(1)
+    except KeyboardInterrupt:
+        print('\n⚠️  获取镜像清单时被用户中断')
+        sys.exit(0)
+    except requests.exceptions.RequestException as e:
+        print(f'Network error fetching manifest: {e}')
+        exit(1)
+
+    manifest = resp.json()
+
+    # Debug: Print manifest structure to understand the format
+    print(f"Manifest keys: {list(manifest.keys())}")
+    if 'mediaType' in manifest:
+        print(f"Media type: {manifest['mediaType']}")
+
+    # Handle multi-platform manifests (both Docker and OCI formats)
+    if target_platform and 'manifests' in manifest:
+        # This is a manifest list, find the right platform
+        found = False
+        for m in manifest['manifests']:
+            platform = m.get('platform', {})
+            platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
+            if platform.get('variant'):
+                platform_str += f"/{platform.get('variant')}"
+            
+            if platform_str == target_platform:
+                print(f"Found manifest for platform: {platform_str}")
+                digest = m['digest']
+                print(f"Platform manifest digest: {digest}")
+                
+                # Fetch the actual manifest for this platform
+                manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
+                print(f"Fetching platform manifest from: {manifest_url}")
+                auth_head = get_auth_head(', '.join(accept_types))
+                resp = requests.get(manifest_url, headers=auth_head, verify=False)
+                if resp.status_code != 200:
+                    print('Cannot fetch manifest for platform {} [HTTP {}]'.format(target_platform, resp.status_code))
+                    if resp.status_code == 401:
+                        print('Authentication failed. Please check your credentials.')
+                        if not username or not password:
+                            print('Private registry requires authentication. Use --username and --password arguments.')
+                    elif resp.status_code == 403:
+                        print('Access forbidden. You may not have permission to access this image.')
+                    exit(1)
+                
+                manifest = resp.json()
+                found = True
+                break
+        
+        if not found:
+            print('No manifest found for platform: {}'.format(target_platform))
+            print('Available platforms:')
+            for m in manifest['manifests']:
+                platform = m.get('platform', {})
+                platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
+                if platform.get('variant'):
+                    platform_str += f"/{platform.get('variant')}"
+                print(f"  - {platform_str}")
+            exit(1)
+
+    # Handle case where no platform is specified but manifest is multi-platform
+    if not target_platform and 'manifests' in manifest:
+        print('Multi-platform image detected. Available platforms:')
+        image_manifests = []
+        last_platform_str = ""
+        for m in manifest['manifests']:
+            # Skip attestation manifests and other non-image manifests
+            annotations = m.get('annotations', {})
+            if annotations.get('vnd.docker.reference.type') == 'attestation-manifest':
+                continue
+            
+            platform = m.get('platform', {})
+            platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
+            if platform.get('variant'):
+                platform_str += f"/{platform.get('variant')}"
+            print(f"  - {platform_str}")
+            image_manifests.append(m)
+            last_platform_str = platform_str
+        
+        if len(image_manifests) == 1:
+            # Only one actual image manifest, use it directly
+            print(f"Using the only available platform: {last_platform_str}")
+            selected_manifest = image_manifests[0]
+            # We need to fetch the actual manifest content
+            digest = selected_manifest['digest']
+            manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
+            print(f"Fetching manifest from: {manifest_url}")
+            auth_head = get_auth_head(', '.join(accept_types))
+            resp = requests.get(manifest_url, headers=auth_head, verify=False)
+            if resp.status_code != 200:
+                print('Cannot fetch manifest [HTTP {}]'.format(resp.status_code))
+                print(f'Response: {resp.content}')
+                exit(1)
+            manifest = resp.json()
+        else:
+            print('Please specify a platform using --platform argument')
+            exit(1)
+
+    # Create image directory
+    imgdir = 'docker_{}_{}'.format(img, tag.replace(':', '_').replace('@', '_'))
+    if os.path.exists(imgdir):
+        shutil.rmtree(imgdir)
+    os.makedirs(imgdir)
+
+    # Extract layers from manifest
+    if 'layers' in manifest:
+        layers = manifest['layers']
+    else:
+        print('Error: No layers found in manifest')
+        print(f'Manifest content: {manifest}')
+        exit(1)
+
+    # Create repositories file
+    repositories = '{{"{}":{{"{}":"{}"}}}}'.format(repo, img, tag)
+    with open(imgdir + '/repositories', 'w') as f:
+        f.write(repositories)
+
+    # Download layers concurrently
+    print('Downloading {} layers...'.format(len(layers)))
+    print('💡 提示: 按 Ctrl+C 可以随时中断下载\n')
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_concurrent_downloads) as thread_executor:
+            executor = thread_executor
+            
+            future_to_layer = {thread_executor.submit(download_layer, layer, imgdir, 'sha256:' + hashlib.sha256(''.encode()).hexdigest()): layer for layer in layers}
+
+            for future in as_completed(future_to_layer):
+                # 检查中断信号
+                if shutdown_event.is_set():
+                    print('\n⚠️  下载已被用户中断')
+                    break
+                    
+                layer = future_to_layer[future]
+                try:
+                    result = future.result()
+                    if result:
+                        print('{}: Layer {} completed'.format(result['fake_layerid'][:12], result['layer']['digest'][7:19]))
+                    else:
+                        print('ERROR: Failed to download layer {}'.format(layer['digest'][7:19]))
+                except KeyboardInterrupt:
+                    print('\n⚠️  下载被用户中断')
+                    break
+                except Exception as e:
+                    print('ERROR: Exception downloading layer {}: {}'.format(layer['digest'][7:19], str(e)))
+            
+            # 清除全局executor引用
+            executor = None
+            
+    except KeyboardInterrupt:
+        print('\n\n⚠️  下载被用户中断，正在清理...')
+        # 清理临时目录
+        if os.path.exists(imgdir):
+            shutil.rmtree(imgdir)
+            print(f'🗑️  已清理临时目录: {imgdir}')
+        print('✅ 清理完成，程序退出')
+        sys.exit(0)
+
+    # Create manifest.json
+    manifest_json = [{
+        'Config': 'config.json',
+        'RepoTags': ['{}:{}'.format(repository, tag)],
+        'Layers': ['{}/layer.tar'.format(hashlib.sha256(('sha256:' + hashlib.sha256(''.encode()).hexdigest() + '\n' + layer['digest'] + '\n').encode()).hexdigest()) for layer in layers]
+    }]
+
+    with open(imgdir + '/manifest.json', 'w') as f:
+        json.dump(manifest_json, f)
+
+    # Save config blob
+    config_digest = manifest['config']['digest']
+    auth_head = get_auth_head('application/vnd.docker.container.image.v1+json')
+    resp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, config_digest), headers=auth_head, verify=False)
     if resp.status_code != 200:
-        print('Cannot fetch manifest for {} [HTTP {}]'.format(repository, resp.status_code))
+        print('Cannot fetch config blob [HTTP {}]'.format(resp.status_code))
         if resp.status_code == 401:
             print('Authentication failed. Please check your credentials.')
             if not username or not password:
                 print('Private registry requires authentication. Use --username and --password arguments.')
         elif resp.status_code == 403:
             print('Access forbidden. You may not have permission to access this image.')
-        print(resp.content)
-        exit(1)
-except KeyboardInterrupt:
-    print('\n⚠️  获取镜像清单时被用户中断')
-    sys.exit(0)
-except requests.exceptions.RequestException as e:
-    print(f'Network error fetching manifest: {e}')
-    exit(1)
-
-manifest = resp.json()
-
-# Debug: Print manifest structure to understand the format
-print(f"Manifest keys: {list(manifest.keys())}")
-if 'mediaType' in manifest:
-    print(f"Media type: {manifest['mediaType']}")
-
-# Handle multi-platform manifests (both Docker and OCI formats)
-if target_platform and 'manifests' in manifest:
-    # This is a manifest list, find the right platform
-    found = False
-    for m in manifest['manifests']:
-        platform = m.get('platform', {})
-        platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
-        if platform.get('variant'):
-            platform_str += f"/{platform.get('variant')}"
-        
-        if platform_str == target_platform:
-            print(f"Found manifest for platform: {platform_str}")
-            digest = m['digest']
-            print(f"Platform manifest digest: {digest}")
-            
-            # Fetch the actual manifest for this platform
-            manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
-            print(f"Fetching platform manifest from: {manifest_url}")
-            auth_head = get_auth_head(', '.join(accept_types))
-            resp = requests.get(manifest_url, headers=auth_head, verify=False)
-            if resp.status_code != 200:
-                print('Cannot fetch manifest for platform {} [HTTP {}]'.format(target_platform, resp.status_code))
-                if resp.status_code == 401:
-                    print('Authentication failed. Please check your credentials.')
-                    if not username or not password:
-                        print('Private registry requires authentication. Use --username and --password arguments.')
-                elif resp.status_code == 403:
-                    print('Access forbidden. You may not have permission to access this image.')
-                exit(1)
-            
-            manifest = resp.json()
-            found = True
-            break
-    
-    if not found:
-        print('No manifest found for platform: {}'.format(target_platform))
-        print('Available platforms:')
-        for m in manifest['manifests']:
-            platform = m.get('platform', {})
-            platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
-            if platform.get('variant'):
-                platform_str += f"/{platform.get('variant')}"
-            print(f"  - {platform_str}")
         exit(1)
 
-# Handle case where no platform is specified but manifest is multi-platform
-if not target_platform and 'manifests' in manifest:
-    print('Multi-platform image detected. Available platforms:')
-    image_manifests = []
-    last_platform_str = ""
-    for m in manifest['manifests']:
-        # Skip attestation manifests and other non-image manifests
-        annotations = m.get('annotations', {})
-        if annotations.get('vnd.docker.reference.type') == 'attestation-manifest':
-            continue
-        
-        platform = m.get('platform', {})
-        platform_str = f"{platform.get('os', 'linux')}/{platform.get('architecture', 'amd64')}"
-        if platform.get('variant'):
-            platform_str += f"/{platform.get('variant')}"
-        print(f"  - {platform_str}")
-        image_manifests.append(m)
-        last_platform_str = platform_str
-    
-    if len(image_manifests) == 1:
-        # Only one actual image manifest, use it directly
-        print(f"Using the only available platform: {last_platform_str}")
-        selected_manifest = image_manifests[0]
-        # We need to fetch the actual manifest content
-        digest = selected_manifest['digest']
-        manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
-        print(f"Fetching manifest from: {manifest_url}")
-        auth_head = get_auth_head(', '.join(accept_types))
-        resp = requests.get(manifest_url, headers=auth_head, verify=False)
-        if resp.status_code != 200:
-            print('Cannot fetch manifest [HTTP {}]'.format(resp.status_code))
-            print(f'Response: {resp.content}')
-            exit(1)
-        manifest = resp.json()
-    else:
-        print('Please specify a platform using --platform argument')
-        exit(1)
+    with open(imgdir + '/config.json', 'wb') as f:
+        f.write(resp.content)
 
-# Create image directory
-imgdir = 'docker_{}_{}'.format(img, tag.replace(':', '_').replace('@', '_'))
-if os.path.exists(imgdir):
+    # Create final tar file
+    docker_tar = repo.replace('/', '_') + '_' + img + '.tar'
+    sys.stdout.write("Creating archive...")
+    sys.stdout.flush()
+
+    tar = tarfile.open(docker_tar, "w")
+    tar.add(imgdir, arcname=os.path.sep)
+    tar.close()
+
+    # Clean up temporary directory
     shutil.rmtree(imgdir)
-os.makedirs(imgdir)
 
-# Extract layers from manifest
-if 'layers' in manifest:
-    layers = manifest['layers']
-else:
-    print('Error: No layers found in manifest')
-    print(f'Manifest content: {manifest}')
-    exit(1)
+    print('\rDocker image pulled: ' + docker_tar)
+    print('You can load it with: docker load < ' + docker_tar)
+    print(f'\n🎉 下载完成！感谢使用 Docker Pull v{__version__}')
+    print(f'📦 开源项目: {__url__}')
 
-# Create repositories file
-repositories = '{{"{}":{{"{}":"{}"}}}}'.format(repo, img, tag)
-with open(imgdir + '/repositories', 'w') as f:
-    f.write(repositories)
-
-# Download layers concurrently
-print('Downloading {} layers...'.format(len(layers)))
-print('💡 提示: 按 Ctrl+C 可以随时中断下载\n')
-
-try:
-    with ThreadPoolExecutor(max_workers=max_concurrent_downloads) as thread_executor:
-        executor = thread_executor
-        
-        future_to_layer = {thread_executor.submit(download_layer, layer, imgdir, 'sha256:' + hashlib.sha256(''.encode()).hexdigest()): layer for layer in layers}
-
-        for future in as_completed(future_to_layer):
-            # 检查中断信号
-            if shutdown_event.is_set():
-                print('\n⚠️  下载已被用户中断')
-                break
-                
-            layer = future_to_layer[future]
-            try:
-                result = future.result()
-                if result:
-                    print('{}: Layer {} completed'.format(result['fake_layerid'][:12], result['layer']['digest'][7:19]))
-                else:
-                    print('ERROR: Failed to download layer {}'.format(layer['digest'][7:19]))
-            except KeyboardInterrupt:
-                print('\n⚠️  下载被用户中断')
-                break
-            except Exception as e:
-                print('ERROR: Exception downloading layer {}: {}'.format(layer['digest'][7:19], str(e)))
-        
-        # 清除全局executor引用
-        executor = None
-        
-except KeyboardInterrupt:
-    print('\n\n⚠️  下载被用户中断，正在清理...')
-    # 清理临时目录
-    if os.path.exists(imgdir):
-        shutil.rmtree(imgdir)
-        print(f'🗑️  已清理临时目录: {imgdir}')
-    print('✅ 清理完成，程序退出')
-    sys.exit(0)
-
-# Create manifest.json
-manifest_json = [{
-    'Config': 'config.json',
-    'RepoTags': ['{}:{}'.format(repository, tag)],
-    'Layers': ['{}/layer.tar'.format(hashlib.sha256(('sha256:' + hashlib.sha256(''.encode()).hexdigest() + '\n' + layer['digest'] + '\n').encode()).hexdigest()) for layer in layers]
-}]
-
-with open(imgdir + '/manifest.json', 'w') as f:
-    json.dump(manifest_json, f)
-
-# Save config blob
-config_digest = manifest['config']['digest']
-auth_head = get_auth_head('application/vnd.docker.container.image.v1+json')
-resp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, config_digest), headers=auth_head, verify=False)
-if resp.status_code != 200:
-    print('Cannot fetch config blob [HTTP {}]'.format(resp.status_code))
-    if resp.status_code == 401:
-        print('Authentication failed. Please check your credentials.')
-        if not username or not password:
-            print('Private registry requires authentication. Use --username and --password arguments.')
-    elif resp.status_code == 403:
-        print('Access forbidden. You may not have permission to access this image.')
-    exit(1)
-
-with open(imgdir + '/config.json', 'wb') as f:
-    f.write(resp.content)
-
-# Create final tar file
-docker_tar = repo.replace('/', '_') + '_' + img + '.tar'
-sys.stdout.write("Creating archive...")
-sys.stdout.flush()
-
-tar = tarfile.open(docker_tar, "w")
-tar.add(imgdir, arcname=os.path.sep)
-tar.close()
-
-# Clean up temporary directory
-shutil.rmtree(imgdir)
-
-print('\rDocker image pulled: ' + docker_tar)
-print('You can load it with: docker load < ' + docker_tar)
-print(f'\n🎉 下载完成！感谢使用 Docker Pull v{__version__}')
-print(f'📦 开源项目: {__url__}')
-
-# Display cache statistics
-if use_cache and (cache_stats['hits'] > 0 or cache_stats['misses'] > 0):
-    total_layers = cache_stats['hits'] + cache_stats['misses']
-    hit_rate = (cache_stats['hits'] / total_layers * 100) if total_layers > 0 else 0
-    saved_mb = cache_stats['bytes_saved'] / (1024 * 1024)
-    print(f"\n💾 Cache Statistics:")
-    print(f"   Cache hits: {cache_stats['hits']}/{total_layers} layers ({hit_rate:.1f}%)")
-    if cache_stats['bytes_saved'] > 0:
-        if saved_mb >= 1024:
-            print(f"   Data saved: {saved_mb/1024:.1f} GB")
-        else:
-            print(f"   Data saved: {saved_mb:.1f} MB")
-    print(f"   Cache location: {cache_dir}")
+    # Display cache statistics
+    if use_cache and (cache_stats['hits'] > 0 or cache_stats['misses'] > 0):
+        total_layers = cache_stats['hits'] + cache_stats['misses']
+        hit_rate = (cache_stats['hits'] / total_layers * 100) if total_layers > 0 else 0
+        saved_mb = cache_stats['bytes_saved'] / (1024 * 1024)
+        print(f"\n💾 Cache Statistics:")
+        print(f"   Cache hits: {cache_stats['hits']}/{total_layers} layers ({hit_rate:.1f}%)")
+        if cache_stats['bytes_saved'] > 0:
+            if saved_mb >= 1024:
+                print(f"   Data saved: {saved_mb/1024:.1f} GB")
+            else:
+                print(f"   Data saved: {saved_mb:.1f} MB")
+        print(f"   Cache location: {cache_dir}")
