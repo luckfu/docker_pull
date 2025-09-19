@@ -136,7 +136,15 @@ jobs:
       if: matrix.platform != 'windows'
       run: |
         cd dist
-        tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
+        # Fix permissions for ARM64 builds
+        chmod 755 docker_pull_${{ matrix.platform }}_${{ matrix.arch }} || true
+        # Use sudo for ARM64 builds to avoid permission issues
+        if [ "${{ matrix.arch }}" = "arm64" ]; then
+          sudo tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
+          sudo chown $(whoami):$(whoami) docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.tar.gz
+        else
+          tar -czf docker_pull_${{ matrix.platform }}_${{ matrix.arch }}.tar.gz docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
+        fi
     
     - name: Create archive (Windows)
       if: matrix.platform == 'windows'
