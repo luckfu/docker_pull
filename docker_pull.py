@@ -175,6 +175,48 @@ if not args.import_tar:
 class RetryError(Exception):
     pass
 
+def get_auth_head(type_var, registry=None, repository=None, username=None, password=None, auth_url=None, reg_service=None):
+    """Get authentication header for Docker registry requests"""
+    header = {'Accept': type_var}
+    
+    # If username and password are provided, use basic auth
+    if username and password:
+        # Use basic authentication for private registries
+        credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+        header['Authorization'] = f'Basic {credentials}'
+        return header
+    
+    # For public registries or when no credentials provided, use token auth
+    try:
+        # Use provided auth_url or construct default
+        if not auth_url:
+            auth_url = 'https://auth.docker.io/token'
+        if not reg_service:
+            reg_service = 'registry.docker.io'
+            
+        token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
+        
+        # Add credentials to token request if available
+        auth = None
+        if username and password:
+            auth = (username, password)
+            
+        resp = requests.get(token_url, auth=auth, verify=False)
+        
+        if resp.status_code == 200:
+            token_data = resp.json()
+            token = token_data.get('token') or token_data.get('access_token')
+            if token:
+                header['Authorization'] = f'Bearer {token}'
+        else:
+            # If token auth fails, try anonymous access
+            print(f"Warning: Token authentication failed with status {resp.status_code}")
+            
+    except Exception as e:
+        print(f"Warning: Could not obtain authentication token: {e}")
+    
+    return header
+
 def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
     def decorator(func):
         @wraps(func)
@@ -193,6 +235,51 @@ def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
             return None
         return wrapper
     return decorator
+
+# Initialize variables for image download mode
+if not args.import_tar:
+    image_arg = args.image
+    target_platform = args.platform
+    max_concurrent_downloads = args.max_concurrent_downloads
+
+    # Cache configuration
+    use_cache = not args.no_cache
+    if args.cache_dir:
+        cache_dir = Path(args.cache_dir).expanduser().resolve()
+    else:
+        cache_dir = Path.cwd() / 'docker_images_cache'
+
+    layers_cache_dir = cache_dir / 'layers'
+    manifests_cache_dir = cache_dir / 'manifests'
+
+    # Create cache directories if caching is enabled
+    if use_cache:
+        layers_cache_dir.mkdir(parents=True, exist_ok=True)
+        manifests_cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Using layer cache: {cache_dir}")
+    else:
+        print("Layer caching disabled")
+
+    # Initialize progress tracking
+    progress_lock = threading.Lock()
+    download_progress = {}
+    cache_stats = {'hits': 0, 'misses': 0, 'bytes_saved': 0}
+
+    # Initialize HTTP session
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Docker-Pull-Script/1.0'})
+
+    # Authentication configuration
+    username = args.username
+    password = args.password
+
+    # Print authentication status
+    if username and password:
+        print(f"Using authentication for user: {username}")
+    elif username or password:
+        print("Warning: Both username and password are required for authentication")
+    else:
+        print("Using anonymous access (no credentials provided)")
 
     # Look for the Docker image to download
     repo = 'library'
@@ -256,8 +343,8 @@ def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
             'service': 'registry.cn-beijing.aliyuncs.com'
         },
         'registry.cn-hangzhou.aliyuncs.com': {
-            'auth_url': 'https://registry.cn-hangzhou.aliyuncs.com/v2/token',
-            'service': 'registry.cn-hangzhou.aliyuncs.com'
+            'auth_url': 'https://dockerauth.cn-hangzhou.aliyuncs.com/auth',
+            'service': 'registry.aliyuncs.com:cn-hangzhou:26842'
         }
     }
 
@@ -267,7 +354,7 @@ def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
         reg_service = registry_auth_endpoints[registry]['service']
 
     # Probe for authentication endpoint
-    resp = requests.get(f'https://{registry}/v2/', verify=False)
+    resp = requests.get(f'https://{registry}/v2/', verify=False, timeout=10)
     if resp.status_code == 401:
         www_auth = resp.headers.get('WWW-Authenticate', '')
         if 'Bearer' in www_auth:
@@ -290,42 +377,6 @@ def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
         elif 'Basic' in www_auth:
             # Registry uses basic authentication
             print(f"Registry {registry} uses basic authentication")
-
-
-    def get_auth_head(type_var):
-        header = {'Accept': type_var}
-        
-        # If username and password are provided, use basic auth
-        if username and password:
-            # Use basic authentication for private registries
-            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
-            header['Authorization'] = f'Basic {credentials}'
-            return header
-        
-        # For public registries or when no credentials provided, use token auth
-        try:
-            token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
-            
-            # Add credentials to token request if available
-            auth = None
-            if username and password:
-                auth = (username, password)
-                
-            resp = requests.get(token_url, auth=auth, verify=False)
-            
-            if resp.status_code == 200:
-                token_data = resp.json()
-                token = token_data.get('token') or token_data.get('access_token')
-                if token:
-                    header['Authorization'] = f'Bearer {token}'
-            else:
-                # If token auth fails, try anonymous access
-                print(f"Warning: Token authentication failed with status {resp.status_code}")
-                
-        except Exception as e:
-            print(f"Warning: Could not obtain authentication token: {e}")
-        
-        return header
 
 def format_speed(bytes_downloaded):
     """Format download speed in human-readable format"""
@@ -681,7 +732,7 @@ else:
         'application/vnd.docker.distribution.manifest.v2+json',
         'application/vnd.docker.distribution.manifest.v1+json'
     ]
-    auth_head = get_auth_head(', '.join(accept_types))
+    auth_head = get_auth_head(', '.join(accept_types), registry, repository, username, password, auth_url, reg_service)
 
     # Get manifest
     try:
