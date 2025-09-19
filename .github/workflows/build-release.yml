@@ -16,6 +16,10 @@ jobs:
             platform: linux
             arch: x64
             executable: docker_pull
+          - os: ubuntu-latest
+            platform: linux
+            arch: arm64
+            executable: docker_pull
           - os: windows-latest
             platform: windows
             arch: x64
@@ -37,8 +41,8 @@ jobs:
       with:
         python-version: '3.11'
     
-    - name: Install UPX (Linux)
-      if: matrix.platform == 'linux'
+    - name: Install UPX (Linux x64)
+      if: matrix.platform == 'linux' && matrix.arch == 'x64'
       run: |
         sudo apt-get update
         sudo apt-get install -y upx-ucl
@@ -68,8 +72,8 @@ jobs:
         pip install pyinstaller Pillow
       shell: pwsh
     
-    - name: Install dependencies (Linux/macOS)
-      if: matrix.platform != 'windows'
+    - name: Install dependencies (Linux x64/macOS)
+      if: (matrix.platform == 'linux' && matrix.arch == 'x64') || matrix.platform == 'macos'
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
@@ -78,9 +82,27 @@ jobs:
     - name: Setup cross-platform icons
       run: |
         python setup_icons.py
-    
-    - name: Build with PyInstaller (Linux/macOS)
-      if: matrix.platform != 'windows'
+
+    - name: Build for Linux arm64
+      if: matrix.platform == 'linux' && matrix.arch == 'arm64'
+      uses: uraimo/run-on-arch-action@v2.6.0
+      with:
+        arch: aarch64
+        distro: ubuntu22.04
+        githubToken: ${{ secrets.GITHUB_TOKEN }}
+        install: |
+          apt-get update -y
+          apt-get install -y upx-ucl python3-pip
+        run: |
+          pip3 install --upgrade pip
+          pip3 install -r requirements.txt
+          pip3 install pyinstaller Pillow
+          python3 setup_icons.py
+          pyinstaller docker_pull_fixed_icon.spec
+          mv dist/docker_pull dist/docker_pull_${{ matrix.platform }}_${{ matrix.arch }}
+
+    - name: Build with PyInstaller (Linux x64/macOS)
+      if: (matrix.platform == 'linux' && matrix.arch == 'x64') || matrix.platform == 'macos'
       run: |
         # Use fixed icon spec file with absolute paths
         pyinstaller docker_pull_fixed_icon.spec

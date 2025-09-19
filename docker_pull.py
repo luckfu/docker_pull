@@ -179,42 +179,33 @@ def get_auth_head(type_var, registry=None, repository=None, username=None, passw
     """Get authentication header for Docker registry requests"""
     header = {'Accept': type_var}
     
-    # If username and password are provided, use basic auth
+    # If username and password are provided, use basic auth first
     if username and password:
         # Use basic authentication for private registries
         credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
         header['Authorization'] = f'Basic {credentials}'
         return header
     
-    # For public registries or when no credentials provided, use token auth
-    try:
-        # Use provided auth_url or construct default
-        if not auth_url:
-            auth_url = 'https://auth.docker.io/token'
-        if not reg_service:
-            reg_service = 'registry.docker.io'
+    # Try token auth if we have auth_url and reg_service (from registry probing or known endpoints)
+    if registry and auth_url and reg_service:
+        try:
+            token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
             
-        token_url = f"{auth_url}?service={reg_service}&scope=repository:{repository}:pull"
-        
-        # Add credentials to token request if available
-        auth = None
-        if username and password:
-            auth = (username, password)
+            resp = requests.get(token_url, verify=False, timeout=10)
             
-        resp = requests.get(token_url, auth=auth, verify=False)
-        
-        if resp.status_code == 200:
-            token_data = resp.json()
-            token = token_data.get('token') or token_data.get('access_token')
-            if token:
-                header['Authorization'] = f'Bearer {token}'
-        else:
-            # If token auth fails, try anonymous access
-            print(f"Warning: Token authentication failed with status {resp.status_code}")
-            
-    except Exception as e:
-        print(f"Warning: Could not obtain authentication token: {e}")
+            if resp.status_code == 200:
+                token_data = resp.json()
+                token = token_data.get('token') or token_data.get('access_token')
+                if token:
+                    header['Authorization'] = f'Bearer {token}'
+            else:
+                # If token auth fails, try anonymous access
+                print(f"Warning: Token authentication failed with status {resp.status_code}")
+                
+        except Exception as e:
+            print(f"Warning: Could not obtain authentication token: {e}")
     
+    # For registries without token auth configuration, just return basic header
     return header
 
 def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
@@ -352,31 +343,41 @@ if not args.import_tar:
     if registry in registry_auth_endpoints:
         auth_url = registry_auth_endpoints[registry]['auth_url']
         reg_service = registry_auth_endpoints[registry]['service']
-
-    # Probe for authentication endpoint
-    resp = requests.get(f'https://{registry}/v2/', verify=False, timeout=10)
-    if resp.status_code == 401:
-        www_auth = resp.headers.get('WWW-Authenticate', '')
-        if 'Bearer' in www_auth:
-            # Parse WWW-Authenticate header for token endpoint
+    else:
+        # For private registries, don't probe for authentication unless necessary
+        # Only probe if we don't have credentials
+        if not (username and password):
             try:
-                # Handle different formats of WWW-Authenticate header
-                if 'realm=' in www_auth:
-                    realm_start = www_auth.find('realm="') + 7
-                    realm_end = www_auth.find('"', realm_start)
-                    auth_url = www_auth[realm_start:realm_end]
-                    
-                if 'service=' in www_auth:
-                    service_start = www_auth.find('service="') + 9
-                    service_end = www_auth.find('"', service_start)
-                    if service_start > 8:  # Check if service= was found
-                        reg_service = www_auth[service_start:service_end]
-            except (IndexError, ValueError):
-                # Fallback to registry-specific defaults
-                pass
-        elif 'Basic' in www_auth:
-            # Registry uses basic authentication
-            print(f"Registry {registry} uses basic authentication")
+                # Probe for authentication endpoint
+                resp = requests.get(f'https://{registry}/v2/', verify=False, timeout=10)
+                if resp.status_code == 401:
+                    www_auth = resp.headers.get('WWW-Authenticate', '')
+                    if 'Bearer' in www_auth:
+                        # Parse WWW-Authenticate header for token endpoint
+                        try:
+                            # Handle different formats of WWW-Authenticate header
+                            if 'realm=' in www_auth:
+                                realm_start = www_auth.find('realm="') + 7
+                                realm_end = www_auth.find('"', realm_start)
+                                auth_url = www_auth[realm_start:realm_end]
+                                
+                            if 'service=' in www_auth:
+                                service_start = www_auth.find('service="') + 9
+                                service_end = www_auth.find('"', service_start)
+                                if service_start > 8:  # Check if service= was found
+                                    reg_service = www_auth[service_start:service_end]
+                        except (IndexError, ValueError):
+                            # Fallback to registry-specific defaults
+                            pass
+                    elif 'Basic' in www_auth:
+                        # Registry uses basic authentication
+                        print(f"Registry {registry} uses basic authentication")
+                elif resp.status_code == 200:
+                    # Registry allows anonymous access
+                    print(f"Registry {registry} allows anonymous access")
+            except Exception as e:
+                print(f"Warning: Could not probe registry {registry}: {e}")
+                # Continue with basic authentication if credentials are provided
 
 def format_speed(bytes_downloaded):
     """Format download speed in human-readable format"""
@@ -624,7 +625,10 @@ else:
         cache_path = check_layer_cache(ublob)
         if cache_path:
             with progress_lock:
-                print(f'{ublob[7:19]}: Using cached layer')
+                # 显示缓存使用的进度条
+                sys.stdout.write(f'\r{ublob[7:19]}: |{"█" * 30}| 100.0% (cached)')
+                sys.stdout.flush()
+                print(f'\n{ublob[7:19]}: Using cached layer')
             if use_cached_layer(cache_path, layerdir, ublob):
                 return {'fake_layerid': fake_layerid, 'layer': layer, 'layerdir': layerdir}
             else:
@@ -634,10 +638,13 @@ else:
         # Update cache miss stats
         with progress_lock:
             cache_stats['misses'] += 1
+            # 显示开始下载的进度条
+            sys.stdout.write(f'\r{ublob[7:19]}: |{" " * 30}|   0.0% (starting...)')
+            sys.stdout.flush()
 
         start_time = time.time()
 
-        auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json')
+        auth_head = get_auth_head('application/vnd.docker.distribution.manifest.v2+json', registry, repository, username, password, auth_url, reg_service)
 
         # Try primary URL first, then fallback URLs
         urls = [f'https://{registry}/v2/{repository}/blobs/{ublob}']
@@ -689,7 +696,13 @@ else:
                             last_update = current_time
 
             with progress_lock:
-                print(f'{ublob[7:19]}: Download complete ({format_speed(downloaded)})')
+                # 显示最终完成的进度条
+                if content_length:
+                    sys.stdout.write(f'\r{ublob[7:19]}: |{"█" * 30}| 100.0% ({format_speed(downloaded)})')
+                else:
+                    sys.stdout.write(f'\r{ublob[7:19]}: |{"█" * 30}| 100.0% ({format_speed(downloaded)})')
+                sys.stdout.flush()
+                print(f'\n{ublob[7:19]}: Download complete')
                 print(f'{ublob[7:19]}: Extracting...')
 
             # Stream decompress to avoid memory issues
@@ -779,7 +792,7 @@ else:
                 # Fetch the actual manifest for this platform
                 manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
                 print(f"Fetching platform manifest from: {manifest_url}")
-                auth_head = get_auth_head(', '.join(accept_types))
+                auth_head = get_auth_head(', '.join(accept_types), registry, repository, username, password, auth_url, reg_service)
                 resp = requests.get(manifest_url, headers=auth_head, verify=False)
                 if resp.status_code != 200:
                     print('Cannot fetch manifest for platform {} [HTTP {}]'.format(target_platform, resp.status_code))
@@ -833,7 +846,7 @@ else:
             digest = selected_manifest['digest']
             manifest_url = 'https://{}/v2/{}/manifests/{}'.format(registry, repository, digest)
             print(f"Fetching manifest from: {manifest_url}")
-            auth_head = get_auth_head(', '.join(accept_types))
+            auth_head = get_auth_head(', '.join(accept_types), registry, repository, username, password, auth_url, reg_service)
             resp = requests.get(manifest_url, headers=auth_head, verify=False)
             if resp.status_code != 200:
                 print('Cannot fetch manifest [HTTP {}]'.format(resp.status_code))
@@ -916,7 +929,7 @@ else:
 
     # Save config blob
     config_digest = manifest['config']['digest']
-    auth_head = get_auth_head('application/vnd.docker.container.image.v1+json')
+    auth_head = get_auth_head('application/vnd.docker.container.image.v1+json', registry, repository, username, password, auth_url, reg_service)
     resp = requests.get('https://{}/v2/{}/blobs/{}'.format(registry, repository, config_digest), headers=auth_head, verify=False)
     if resp.status_code != 200:
         print('Cannot fetch config blob [HTTP {}]'.format(resp.status_code))

@@ -38,6 +38,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -45,7 +46,7 @@ ENV/
 # Project specific
 *.tar
 docker_*/
-!docker_images_cache/
+docker_images_cache/
 
 # Logs
 *.log
