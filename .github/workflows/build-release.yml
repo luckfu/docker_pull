@@ -90,10 +90,13 @@ jobs:
         arch: aarch64
         distro: ubuntu22.04
         githubToken: ${{ secrets.GITHUB_TOKEN }}
+        dockerRunArgs: |
+          --volume "${PWD}:/workspace"
         install: |
           apt-get update -y
-          apt-get install -y upx-ucl python3-pip
+          apt-get install -y upx-ucl python3-pip python3-dev build-essential
         run: |
+          cd /workspace
           pip3 install --upgrade pip
           pip3 install -r requirements.txt
           pip3 install pyinstaller Pillow
