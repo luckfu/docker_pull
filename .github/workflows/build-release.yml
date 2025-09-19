@@ -85,7 +85,7 @@ jobs:
 
     - name: Build for Linux arm64
       if: matrix.platform == 'linux' && matrix.arch == 'arm64'
-      uses: uraimo/run-on-arch-action@v2.6.0
+      uses: uraimo/run-on-arch-action@v3
       with:
         arch: aarch64
         distro: ubuntu22.04
