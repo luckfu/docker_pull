@@ -88,7 +88,7 @@ jobs:
       uses: uraimo/run-on-arch-action@v3
       with:
         arch: aarch64
-        distro: ubuntu22.04
+        distro: ubuntu20.04
         githubToken: ${{ secrets.GITHUB_TOKEN }}
         dockerRunArgs: |
           --volume "${PWD}:/workspace"
